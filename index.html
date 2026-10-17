@@ -722,11 +722,17 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
   <select class="fil" id="sF" onchange="filter()">
     <option value="">All Statuses</option>
     <option value="O">Open</option>
+    <option value="O_ALLOC">Open – Allocated</option>
+    <option value="O_UNALLOC">Open – Unallocated</option>
     <option value="D">In Progress</option>
     <option value="R">On Route</option>
     <option value="C">Closed</option>
     <option value="X">Cannot Complete</option>
   </select>
+  <button class="rbtn" id="hideClosed" onclick="toggleHideClosed()" title="Toggle closed jobs" style="background:var(--brand);border-color:var(--brand);color:#fff">
+    <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+    Hide Closed
+  </button>
   <div class="sw">
     <svg class="si" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
     <input class="sinp" id="qI" type="text" placeholder="Customer, address, ID…" oninput="filter()">
@@ -1687,11 +1693,22 @@ function buildEngs(){
   es.forEach(e=>{const o=document.createElement('option');o.value=e;o.textContent=e;if(e===cur)o.selected=true;sel.appendChild(o);});
 }
 
+let hideClosedActive=true;
+function toggleHideClosed(){
+  hideClosedActive=!hideClosedActive;
+  const btn=document.getElementById('hideClosed');
+  if(hideClosedActive){btn.style.background='var(--brand)';btn.style.borderColor='var(--brand)';btn.style.color='#fff';}
+  else{btn.style.background='var(--surf)';btn.style.borderColor='var(--bdr)';btn.style.color='var(--t2)';}
+  filter();
+}
 function filter(){
   const e=document.getElementById('eF').value,s=document.getElementById('sF').value,q=document.getElementById('qI').value.toLowerCase().trim();
   S.fil=S.calls.filter(c=>{
     if(e&&eng(c)!==e)return false;
-    if(s&&c.status!==s)return false;
+    if(s==='O_ALLOC'){const en=eng(c);if(c.status!=='O'||!en||en==='Unassigned'||en==='unassigned')return false;}
+    else if(s==='O_UNALLOC'){const en=eng(c);if(c.status!=='O'||(en&&en!=='Unassigned'&&en!=='unassigned'))return false;}
+    else if(s&&c.status!==s)return false;
+    if(hideClosedActive&&!s&&c.status==='C')return false;
     if(q){const h=[c.customerName||'',c.address||'',c.id||''].join(' ').toLowerCase();if(!h.includes(q))return false;}
     return true;
   });
