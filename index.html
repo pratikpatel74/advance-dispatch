@@ -2440,8 +2440,8 @@ async function loadFromSupabase(){
     if(r.ok){
       const rows=await r.json();
       rows.forEach(row=>{
-        const isEquip=['catering','cooling','visitour','general'].includes((row.category||'').toLowerCase());
-        const isCert=['certification'].includes((row.category||'').toLowerCase());
+        const isEquip=['catering','cooling','visitour'].includes((row.category||'').toLowerCase());
+        const isCert=['certification','equipment','general'].includes((row.category||'').toLowerCase());
         if(isCert){
           if(!ENG_SKILLS[row.engineer_name])ENG_SKILLS[row.engineer_name]=[];
           if(!ENG_SKILLS[row.engineer_name].includes(row.skill_name))
