@@ -2610,7 +2610,7 @@ function isEngAvailable(eng, dateStr){
   if(!e)return false;
   const date=new Date(dateStr);
   const dow=date.getDay();
-  const workDays=e.workingDays||[1,2,3,4,5];
+  const workDays=(e.workingDays&&e.workingDays.length)?e.workingDays:[1,2,3,4,5];
   if(!workDays.includes(dow))return false;
   const onLeave=(e.leave||[]).some(l=>{
     const t=l.type||'';
@@ -4452,9 +4452,14 @@ async function loadBulkJobs(){
 
 function getBulkSuggestions(job){
   if(!ENG_DATA||!ENG_DATA.length)return[];
-  return ENG_DATA
-    .map(e=>scoreEngineerForJob(e,job,{penalise:false})||scoreEngineerForJob(e,job,{penalise:true}))
+  const pass1=ENG_DATA
+    .map(e=>scoreEngineerForJob(e,job,{penalise:false}))
     .filter(r=>r&&r.score>0&&!r.blocked)
+    .sort((a,b)=>b.score-a.score);
+  if(pass1.length)return pass1.slice(0,3);
+  return ENG_DATA
+    .map(e=>scoreEngineerForJob(e,job,{penalise:true}))
+    .filter(r=>r&&r.score>0)
     .sort((a,b)=>b.score-a.score)
     .slice(0,3);
 }
