@@ -2700,7 +2700,7 @@ function scoreEngineerForJob(e, job, {penalise=false}={}){
   }
 
   // ── Skills ───────────────────────────────────────────────────────────────
-  const allSkills=[...(e.skills||ENG_SKILLS[e.name]||[]),...(engCfg.vtSkills||[])];
+  const allSkills=[...(e.skills||[]),...(ENG_SKILLS[e.name]||[]),...(engCfg.vtSkills||[])];
   const required=job.requiredSkills||[];
   const matched=required.filter(s=>allSkills.includes(s));
   const missing=required.filter(s=>!allSkills.includes(s));
