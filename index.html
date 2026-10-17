@@ -2612,48 +2612,166 @@ function engConflict(engName, dateStr, proposedStartMins, proposedDur, proposedL
   return{hard:false,travel:false};
 }
 
-function findBestEngineer(requiredSkills, scheduledTime, jobId){
+/* ── ENGINEER SCORING ENGINE v2 ──────────────────────────────────────────────
+   Weights: Skill 30 | Distance 25 | Availability 20 | Workload 15 | Route 10
+   SLA urgency multiplies the final score (1.0–1.5×).
+   Accepts a full job object; returns a scored result object or null if excluded.
+   ─────────────────────────────────────────────────────────────────────────── */
+function scoreEngineerForJob(e, job, {penalise=false}={}){
   const cfg=DISPATCH_CONFIG;
-  const dateStr=scheduledTime?scheduledTime.slice(0,10):'';
-  const engs=ENG_DATA.length?ENG_DATA:ALL_ENGS.map(n=>({name:n,skills:ENG_SKILLS[n]||[]}));
-  const jobLoc=jobId?JOB_LOCS[jobId]:null;
-  const proposedJob=(jobId&&MOCK.length)?MOCK.find(c=>c.id===jobId):jobId?S.calls.find(c=>c.id===jobId):null;
-  const proposedDur=proposedJob?.estimatedDuration||60;
-  const proposedStartMins=scheduledTime?(()=>{const d=new Date(scheduledTime);return d.getHours()*60+d.getMinutes();})():null;
+  const home=ENG_HOMES[e.name];
+  const engCfg=ENG_CONFIG[e.name]||{};
+  const dateStr=(job.scheduledTime||'').slice(0,10);
+  const dur=job.estimatedDuration||60;
+  const jobLoc=job.lat&&job.lon?{lat:job.lat,lng:job.lon}:getJobLoc(job.id);
+  const proposedStartMins=job.scheduledTime
+    ?(d=>{return d.getHours()*60+d.getMinutes();})(new Date(job.scheduledTime))
+    :null;
 
-  function scoreEng(e,penalise){
-    const home=ENG_HOMES[e.name];
-    const radius=cfg.engineerRadii[e.name]??home?.travelRadius??20;
-    if(jobLoc&&home){
-      const dist=haversine(home.lat,home.lng,jobLoc.lat,jobLoc.lng);
-      if(dist>radius&&!penalise)return null;
-    }
-    // Conflict check
-    if(dateStr){if(ENG_ABSENCES[e.name]?.[dateStr])return null;if(BANK_HOLIDAYS.includes(dateStr))return null;}
-    if(dateStr&&proposedStartMins!==null&&jobLoc){
-      const cf=engConflict(e.name,dateStr,proposedStartMins,proposedDur,jobLoc);
-      if(cf.hard)return null; // hard overlap — excluded from all passes
-      if(cf.travel&&!penalise)return null; // travel gap miss — excluded from pass 1
-    }
-    const cfg2=ENG_CONFIG[e.name]||{};
-    const skills=[...(e.skills||ENG_SKILLS[e.name]||[]),...(cfg2.vtSkills||[])];
-    const available=dateStr?isEngAvailable(e.name,dateStr):true;
-    const matched=(requiredSkills||[]).filter(s=>skills.includes(s)).length;
-    const total=(requiredSkills||[]).length;
-    const fullMatch=total>0&&matched===total;
-    let score=(available?cfg.scoreAvailability:0)+(fullMatch?cfg.scoreFullSkill:matched*cfg.scorePartialSkill);
-    if(penalise&&jobLoc&&home){
-      const dist=haversine(home.lat,home.lng,jobLoc.lat,jobLoc.lng);
-      const r=cfg.engineerRadii[e.name]??home.travelRadius??20;
-      if(dist>r)score+=cfg.scoreOutOfRadius;
-    }
-    return{name:e.name,score,available,fullMatch,matched,total};
+  const blockers=[];
+  const tags=[];
+
+  // ── Availability ─────────────────────────────────────────────────────────
+  const onLeave=dateStr&&(ENG_ABSENCES[e.name]?.[dateStr]);
+  const bankHol=dateStr&&BANK_HOLIDAYS.includes(dateStr);
+  const available=dateStr?isEngAvailable(e.name,dateStr):true;
+  if(onLeave)blockers.push('On leave');
+  else if(bankHol)blockers.push('Bank holiday');
+  else if(!available)blockers.push('Not working');
+
+  // ── Shift fit ─────────────────────────────────────────────────────────────
+  const hours=ENG_HOURS[e.name];
+  if(hours&&proposedStartMins!==null){
+    const[eh,em]=hours.end.split(':').map(Number);
+    if(proposedStartMins+dur>eh*60+em)blockers.push(`Shift ends ${hours.end}`);
   }
 
-  const pass1=engs.map(e=>scoreEng(e,false)).filter(x=>x&&x.score>0).sort((a,b)=>b.score-a.score);
-  if(pass1.length)return pass1[0].name;
-  if(!cfg.allowOutOfRadius)return null;
-  const pass2=engs.map(e=>scoreEng(e,true)).filter(x=>x&&x.score>0).sort((a,b)=>b.score-a.score);
+  // ── Skills ───────────────────────────────────────────────────────────────
+  const allSkills=[...(e.skills||ENG_SKILLS[e.name]||[]),...(engCfg.vtSkills||[])];
+  const required=job.requiredSkills||[];
+  const matched=required.filter(s=>allSkills.includes(s));
+  const missing=required.filter(s=>!allSkills.includes(s));
+  const skillRatio=required.length===0?1:matched.length/required.length;
+  if(required.length>0&&matched.length===0)blockers.push('No skill match');
+
+  // ── Department gate ───────────────────────────────────────────────────────
+  if(job.department&&engCfg.department&&job.department!==engCfg.department)
+    blockers.push(`Wrong dept (${engCfg.department})`);
+
+  // ── Day jobs (for conflict + workload + route) ────────────────────────────
+  const src=MOCK.length?MOCK:S.calls;
+  const dayJobs=src
+    .filter(j=>j.engineer===e.name&&(j.scheduledTime||'').slice(0,10)===dateStr&&j.id!==job.id)
+    .map(j=>{
+      const d=new Date(j.scheduledTime);const sm=d.getHours()*60+d.getMinutes();const dur2=j.estimatedDuration||60;
+      return{startMins:sm,endMins:sm+dur2,loc:getJobLoc(j.id)||(j.lat&&j.lon?{lat:j.lat,lng:j.lon}:null),slaDeadline:j.slaDeadline};
+    })
+    .sort((a,b)=>a.startMins-b.startMins);
+
+  // ── Conflict check ────────────────────────────────────────────────────────
+  if(proposedStartMins!==null&&jobLoc){
+    const propEnd=proposedStartMins+dur;
+    const hard=dayJobs.some(j=>j.startMins<propEnd&&j.endMins>proposedStartMins);
+    if(hard){blockers.push('Hard conflict');}
+    else if(!penalise){
+      const prev=[...dayJobs].reverse().find(j=>j.endMins<=proposedStartMins);
+      const prevLoc=prev?.loc||home;
+      const prevEnd=prev?prev.endMins:DAY_START_MINS;
+      if(prevLoc){const tIn=travelMins(prevLoc.lat,prevLoc.lng,jobLoc.lat,jobLoc.lng);if(prevEnd+tIn>proposedStartMins)blockers.push('Travel gap in');}
+      const next=dayJobs.find(j=>j.startMins>=propEnd);
+      if(next?.loc){const tOut=travelMins(jobLoc.lat,jobLoc.lng,next.loc.lat,next.loc.lng);if(propEnd+tOut>next.startMins)blockers.push('Travel gap out');}
+    }
+  }
+
+  const isBlocked=blockers.length>0;
+  if(isBlocked&&!penalise)return{name:e.name,score:0,blocked:true,blockers,tags,matched,missing,dayJobCount:dayJobs.length};
+
+  // ── Distance score — from current position (last job end loc), not home ──
+  let distScore=0.5,distMi=null,insertCost=null;
+  if(jobLoc&&home){
+    const prev=proposedStartMins!==null?[...dayJobs].reverse().find(j=>j.endMins<=proposedStartMins):null;
+    const originLoc=prev?.loc||home;
+    const homeDistMi=haversine(home.lat,home.lng,jobLoc.lat,jobLoc.lng);
+    const radius=cfg.engineerRadii[e.name]??home.travelRadius??25;
+    if(homeDistMi>radius&&!penalise){
+      blockers.push(`${Math.round(homeDistMi)}mi (radius ${radius}mi)`);
+      return{name:e.name,score:0,blocked:true,blockers,tags,matched,missing,dayJobCount:dayJobs.length};
+    }
+    distMi=Math.round(haversine(originLoc.lat,originLoc.lng,jobLoc.lat,jobLoc.lng)*10)/10;
+    const tMins=travelMins(originLoc.lat,originLoc.lng,jobLoc.lat,jobLoc.lng);
+    distScore=Math.max(0,1-tMins/90);  // 0 at 90-min drive
+    // Insertion cost = extra travel added to day vs going direct
+    const next=proposedStartMins!==null?dayJobs.find(j=>j.startMins>=proposedStartMins+dur):null;
+    if(next?.loc){
+      const tIn=travelMins(originLoc.lat,originLoc.lng,jobLoc.lat,jobLoc.lng);
+      const tOut=travelMins(jobLoc.lat,jobLoc.lng,next.loc.lat,next.loc.lng);
+      const tDirect=travelMins(originLoc.lat,originLoc.lng,next.loc.lat,next.loc.lng);
+      insertCost=Math.max(0,tIn+tOut-tDirect);
+    }else{
+      insertCost=travelMins(originLoc.lat,originLoc.lng,jobLoc.lat,jobLoc.lng);
+    }
+    tags.push({cls:distMi<=15?'ep-ok':'ep-neu',txt:`${distMi}mi`});
+    if(insertCost>0)tags.push({cls:'ep-neu',txt:`+${Math.round(insertCost)}m drive`});
+  }
+
+  // ── Availability score ────────────────────────────────────────────────────
+  const availScore=(onLeave||bankHol||!available)?0:1;
+
+  // ── Workload score ────────────────────────────────────────────────────────
+  const dayJobCount=dayJobs.length;
+  const workloadScore=Math.max(0,1-dayJobCount/8);
+  if(dayJobCount>0)tags.push({cls:dayJobCount>=5?'ep-warn':'ep-neu',txt:`${dayJobCount} jobs`});
+
+  // ── Route score (inverse of insertion cost) ───────────────────────────────
+  const routeScore=insertCost!==null?Math.max(0,1-insertCost/60):0.5;
+
+  // ── Weighted score ────────────────────────────────────────────────────────
+  let score=skillRatio*30+distScore*25+availScore*20+workloadScore*15+routeScore*10;
+
+  // ── SLA multiplier ────────────────────────────────────────────────────────
+  let slaMult=1.0;
+  if(job.slaDeadline){
+    const h=(new Date(job.slaDeadline)-Date.now())/3600000;
+    if(h<0)slaMult=1.5;else if(h<4)slaMult=1.3;else if(h<8)slaMult=1.1;
+  }
+  // Penalise if engineer has SLA-critical job after this one that could be jeopardised
+  if(proposedStartMins!==null){
+    const atRisk=dayJobs.find(j=>j.startMins>=proposedStartMins+dur&&j.slaDeadline&&(new Date(j.slaDeadline)-Date.now())/3600000<4);
+    if(atRisk){score-=15;tags.push({cls:'ep-warn',txt:'SLA risk'});}
+  }
+  score*=slaMult;
+
+  // ── Out-of-radius penalty in pass 2 ──────────────────────────────────────
+  if(penalise&&jobLoc&&home){
+    const homeDistMi=haversine(home.lat,home.lng,jobLoc.lat,jobLoc.lng);
+    const radius=cfg.engineerRadii[e.name]??home.travelRadius??25;
+    if(homeDistMi>radius)score+=cfg.scoreOutOfRadius;  // negative value
+  }
+
+  const breakdown={
+    skill:Math.round(skillRatio*30),
+    dist:Math.round(distScore*25),
+    avail:Math.round(availScore*20),
+    work:Math.round(workloadScore*15),
+    route:Math.round(routeScore*10),
+    total:Math.round(score)
+  };
+
+  return{name:e.name,score,blocked:isBlocked,blockers,tags,breakdown,distMi,insertCost,skillRatio,matched,missing,dayJobCount};
+}
+
+/* ── findBestEngineer — uses scoreEngineerForJob, two-pass, returns name or ranked list ── */
+function findBestEngineer(requiredSkills, scheduledTime, jobId, {topN=1}={}){
+  const engs=ENG_DATA.length?ENG_DATA:ALL_ENGS.map(n=>({name:n,skills:ENG_SKILLS[n]||[]}));
+  const rawJob=(MOCK.length?MOCK:S.calls).find(c=>c.id===jobId)||{};
+  const jobLoc=jobId?getJobLoc(jobId):null;
+  const job={id:jobId,requiredSkills:requiredSkills||[],scheduledTime,estimatedDuration:rawJob.estimatedDuration||60,slaDeadline:rawJob.slaDeadline,lat:jobLoc?.lat,lon:jobLoc?.lng};
+
+  const pass1=engs.map(e=>scoreEngineerForJob(e,job,{penalise:false})).filter(r=>r&&!r.blocked&&r.score>0).sort((a,b)=>b.score-a.score);
+  if(pass1.length)return topN>1?pass1.slice(0,topN):pass1[0].name;
+  if(!DISPATCH_CONFIG.allowOutOfRadius)return topN>1?[]:null;
+  const pass2=engs.map(e=>scoreEngineerForJob(e,job,{penalise:true})).filter(r=>r&&r.score>0).sort((a,b)=>b.score-a.score);
+  if(topN>1)return pass2.slice(0,topN);
   return pass2.length?pass2[0].name:null;
 }
 
@@ -3448,123 +3566,73 @@ function computeJobEligibility(c, dateStr){
   return eligible;
 }
 
-/* ── Phase 4: Enhanced engineer suggestion in job detail panel ── */
+/* ── Engineer Picker — uses scoreEngineerForJob, ranked shortlist ── */
 function buildEngPicker(c){
   const required=c.requiredSkills||[];
   const currentEng=eng(c);
   const allEngs=ENG_DATA.length?ENG_DATA:ALL_ENGS.map(n=>({name:n,skills:ENG_SKILLS[n]||[]}));
-  const jobLoc=getJobLoc(c.id)||(c.lat&&c.lon?{lat:c.lat,lng:c.lon}:null);
-  const dateStr=c.scheduledTime?.slice(0,10)||SELECTED_DATE;
-  const startMins=c.scheduledTime?(()=>{const d=new Date(c.scheduledTime);return d.getHours()*60+d.getMinutes();})():null;
-  const dur=c.estimatedDuration||60;
 
-  // Score each engineer for full eligibility picture
+  // Score every engineer using the shared engine
   const scored=allEngs.map(e=>{
-    const eSkills=e.skills||[];
-    const home=ENG_HOMES[e.name];
-    const hours=ENG_HOURS[e.name];
-    const blockers=[];
-    const tags=[];
-
-    // Skill check
-    const matched=required.filter(s=>eSkills.includes(s));
-    const missing=required.filter(s=>!eSkills.includes(s));
-    const fullSkill=required.length===0||missing.length===0;
-    const partSkill=!fullSkill&&matched.length>0;
-    if(!fullSkill&&!partSkill&&required.length>0)blockers.push('No skill match');
-    if(partSkill)tags.push({cls:'ep-warn',txt:`${matched.length}/${required.length} skills`});
-    if(fullSkill&&required.length>0)tags.push({cls:'ep-ok',txt:'✓ Skilled'});
-
-    // Absence check
-    const onLeave=!!ENG_ABSENCES[e.name]?.[dateStr];
-    const available=isEngAvailable(e.name,dateStr);
-    if(onLeave)blockers.push('On leave');
-    else if(!available)blockers.push('Not working');
-
-    // Radius / distance
-    let distMi=null;
-    let inRadius=true;
-    if(jobLoc&&home){
-      distMi=Math.round(haversine(home.lat,home.lng,jobLoc.lat,jobLoc.lng)*10)/10;
-      const radius=home.travelRadius||25;
-      inRadius=distMi<=radius;
-      if(!inRadius)blockers.push(`${distMi}mi (radius ${radius}mi)`);
-      else tags.push({cls:'ep-ok',txt:`${distMi}mi`});
-    }
-
-    // Shift fit
-    let shiftFit=true;
-    if(hours&&startMins!==null){
-      const [eh,em]=hours.end.split(':').map(Number);
-      const shiftEnd=eh*60+em;
-      if(startMins+dur>shiftEnd){shiftFit=false;blockers.push(`Ends ${hours.end}`);}
-    }
-
-    // Day load (mins of jobs already scheduled today)
-    const src=MOCK.length?MOCK:S.calls;
-    const dayJobs=src.filter(j=>j.engineer===e.name&&j.scheduledTime?.slice(0,10)===dateStr&&j.id!==c.id);
-    const dayLoadMins=dayJobs.reduce((t,j)=>t+(j.estimatedDuration||60),0);
-    const dayLoadH=(dayLoadMins/60).toFixed(1);
-    if(dayLoadMins>0)tags.push({cls:'ep-neu',txt:`${dayLoadH}h today`});
-
-    // Insertion cost — extra travel minutes to slot this job in (approx)
-    let insertCost=null;
-    if(jobLoc&&startMins!==null){
-      const dayJobsSorted=dayJobs.map(j=>{const d2=new Date(j.scheduledTime);return{sm:d2.getHours()*60+d2.getMinutes(),loc:getJobLoc(j.id)};}).sort((a,b)=>a.sm-b.sm);
-      const prev=dayJobsSorted.filter(j=>j.sm<startMins).pop();
-      const next=dayJobsSorted.find(j=>j.sm>=startMins+dur);
-      const prevLoc=prev?.loc||home;
-      const nextLoc=next?.loc||null;
-      const tIn=prevLoc?travelMins(prevLoc.lat,prevLoc.lng,jobLoc.lat,jobLoc.lng):0;
-      const tOut=nextLoc?travelMins(jobLoc.lat,jobLoc.lng,nextLoc.lat,nextLoc.lng):0;
-      const tDirect=prevLoc&&nextLoc?travelMins(prevLoc.lat,prevLoc.lng,nextLoc.lat,nextLoc.lng):0;
-      insertCost=Math.round(tIn+tOut-tDirect);
-      if(insertCost>0)tags.push({cls:'ep-neu',txt:`+${insertCost}m drive`});
-    }
-
-    const isBlocked=blockers.length>0;
-    // Composite sort score (lower = better suggestion)
-    const sortKey=isBlocked?9999:(missing.length*100)+(distMi||0)+(insertCost||0);
-
-    return{e,required,matched,missing,fullSkill,partSkill,tags,blockers,isBlocked,distMi,dayLoadMins,insertCost,sortKey};
-  })
-  .sort((a,b)=>{
-    // blocked goes last; within unblocked sort by skill match then distance then insert cost
-    if(a.isBlocked!==b.isBlocked)return a.isBlocked?1:-1;
-    if(a.missing.length!==b.missing.length)return a.missing.length-b.missing.length;
-    return a.sortKey-b.sortKey;
+    const r=scoreEngineerForJob(e,c,{penalise:false})||scoreEngineerForJob(e,c,{penalise:true});
+    return r||{name:e.name,score:0,blocked:true,blockers:['Error'],tags:[],matched:[],missing:required,dayJobCount:0};
+  }).sort((a,b)=>{
+    if(a.blocked!==b.blocked)return a.blocked?1:-1;  // blocked last
+    return b.score-a.score;
   });
 
-  const eligible=scored.filter(x=>!x.isBlocked);
-  const bestName=eligible[0]?.e.name;
+  const eligible=scored.filter(x=>!x.blocked);
+  // Top-3 suggested names (excluding current)
+  const topSuggested=eligible.filter(x=>x.name!==currentEng).slice(0,3).map(x=>x.name);
 
-  const rows=scored.map(({e,matched,missing,tags,blockers,isBlocked})=>{
-    const col=ec(e.name);
-    const isCur=e.name===currentEng;
-    const isBest=e.name===bestName&&!isCur&&!isBlocked;
+  const rows=scored.map(r=>{
+    const col=ec(r.name);
+    const isCur=r.name===currentEng;
+    const rank=topSuggested.indexOf(r.name);  // 0=best, 1=2nd, 2=3rd, -1=not in top3
+    const isBest=rank===0&&!isCur;
+    const isTop=rank>0&&!isCur;
     let cls='ep-row';
     if(isCur)cls+=' ep-sel';
     if(isBest)cls+=' ep-best';
-    if(isBlocked)cls+=' ep-dis';
+    if(r.blocked)cls+=' ep-dis';
 
-    const tagsHTML=tags.map(t=>`<span class="ep-tag ${t.cls}">${t.txt}</span>`).join('');
-    const blockHTML=blockers.length?`<span class="ep-tag ep-bad">${blockers[0]}</span>`:'';
+    // Build skill tag
+    const skillTag=required.length===0?''
+      :r.missing.length===0?`<span class="ep-tag ep-ok">✓ ${required.length} skills</span>`
+      :r.matched.length>0?`<span class="ep-tag ep-warn">${r.matched.length}/${required.length} skills</span>`
+      :`<span class="ep-tag ep-bad">No match</span>`;
 
-    return`<div class="${cls}" onclick="${isBlocked?'':  `reassign('${c.id}','${e.name}')`}">
-      <div class="eav" style="background:${col};width:26px;height:26px;font-size:9px;flex-shrink:0">${ini(e.name)}</div>
+    const tagsHTML=skillTag+r.tags.map(t=>`<span class="ep-tag ${t.cls}">${t.txt}</span>`).join('');
+    const blockHTML=r.blocked&&r.blockers.length?`<span class="ep-tag ep-bad">${r.blockers[0]}</span>`:'';
+
+    // Score bar (only for eligible)
+    const scoreBar=!r.blocked&&r.breakdown?
+      `<div style="display:flex;gap:3px;margin-top:3px;align-items:center">
+        <div style="height:3px;border-radius:2px;background:var(--brand);opacity:.85;width:${Math.round(r.breakdown.skill/30*40)}px" title="Skill ${r.breakdown.skill}/30"></div>
+        <div style="height:3px;border-radius:2px;background:#1AB37A;opacity:.85;width:${Math.round(r.breakdown.dist/25*40)}px" title="Distance ${r.breakdown.dist}/25"></div>
+        <div style="height:3px;border-radius:2px;background:#E8A020;opacity:.85;width:${Math.round(r.breakdown.work/15*40)}px" title="Workload ${r.breakdown.work}/15"></div>
+        <span style="font-size:9px;color:var(--t4);font-family:'IBM Plex Mono',monospace;margin-left:2px">${Math.round(r.score)}</span>
+      </div>`:'';
+
+    const rankBadge=isBest?'<span class="ep-suggest">★ Best match</span>'
+      :isTop?`<span class="ep-suggest" style="color:#E8A020">#${rank+1} match</span>`:'';
+
+    return`<div class="${cls}" onclick="${r.blocked?'':  `reassign('${c.id}','${r.name}')`}">
+      <div class="eav" style="background:${col};width:26px;height:26px;font-size:9px;flex-shrink:0">${ini(r.name)}</div>
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
-          <span class="ep-name">${e.name}${isCur?' <span style="font-size:10px;color:var(--brand);font-weight:400">(current)</span>':''}</span>
-          ${isBest?'<span class="ep-suggest">★ Suggested</span>':''}
+          <span class="ep-name">${r.name}${isCur?' <span style="font-size:10px;color:var(--brand);font-weight:400">(current)</span>':''}</span>
+          ${rankBadge}
         </div>
         <div class="ep-meta">${tagsHTML}${blockHTML}</div>
+        ${scoreBar}
       </div>
     </div>`;
   }).join('');
 
   const reqLabel=required.length?`<div style="margin-bottom:8px;display:flex;flex-wrap:wrap;gap:2px"><span style="font-size:11px;color:var(--t3);margin-right:4px">Needs:</span>${required.map(s=>`<span class="req-skill">${s}</span>`).join('')}</div>`:'';
-  const countLine=`<div style="font-size:11px;color:var(--t3);margin-bottom:6px;font-family:'IBM Plex Sans',sans-serif">${eligible.length} of ${scored.length} engineers eligible</div>`;
-  return reqLabel+countLine+`<div style="max-height:280px;overflow-y:auto">${rows||'<div style="padding:12px;text-align:center;color:var(--t4);font-size:12px">No engineers found</div>'}</div>`;
+  const countLine=`<div style="font-size:11px;color:var(--t3);margin-bottom:6px;font-family:'IBM Plex Sans',sans-serif">${eligible.length} of ${scored.length} eligible · scored by skill, distance, workload, route</div>`;
+  return reqLabel+countLine+`<div style="max-height:300px;overflow-y:auto">${rows||'<div style="padding:12px;text-align:center;color:var(--t4);font-size:12px">No engineers found</div>'}</div>`;
 }
 
 /* ── MAP DATA ── */
@@ -5094,21 +5162,37 @@ function suggestAll(){
 
   _suggestChanges=dateJobs.map(c=>{
     const curEng=eng(c);
-    const best=findBestEngineer(c.requiredSkills||[],c.scheduledTime,c.id);
-    return{c,prevEng:curEng,newEng:best||curEng};
+    const topResults=findBestEngineer(c.requiredSkills||[],c.scheduledTime,c.id,{topN:1});
+    const best=Array.isArray(topResults)?topResults[0]?.name:topResults;
+    const bestResult=Array.isArray(topResults)?topResults[0]:null;
+    return{c,prevEng:curEng,newEng:best||curEng,bestResult};
   }).filter(x=>x.newEng&&x.newEng!==x.prevEng);
 
   if(!_suggestChanges.length){toast('All jobs already at their best assignment');return;}
 
-  const rows=_suggestChanges.map(({c,prevEng,newEng})=>{
+  const rows=_suggestChanges.map(({c,prevEng,newEng,bestResult})=>{
     const pc=ec(prevEng),nc=ec(newEng);
+    // Build reason string from score breakdown
+    const br=bestResult?.breakdown;
+    const reasons=[];
+    if(br){
+      if(br.skill===30)reasons.push('full skill match');
+      else if(br.skill>0)reasons.push(`${Math.round(bestResult.skillRatio*100)}% skill`);
+      if(bestResult.distMi!==null)reasons.push(`${bestResult.distMi}mi`);
+      if(bestResult.dayJobCount===0)reasons.push('free day');
+      else if(bestResult.dayJobCount<=2)reasons.push(`${bestResult.dayJobCount} jobs`);
+    }
+    const reasonTxt=reasons.length?reasons.join(' · '):'';
     return`<tr>
       <td style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--t3)">${c.id}</td>
-      <td style="font-weight:600;max-width:160px;overflow:hidden;text-overflow:ellipsis">${c.customerName||'—'}</td>
+      <td style="font-weight:600;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.customerName||'—'}</td>
       <td style="white-space:nowrap">${ft(c.scheduledTime)}</td>
       <td><div class="ech" style="background:${pc}18;color:${pc};display:inline-flex;padding:2px 7px 2px 4px"><div class="eav" style="background:${pc};width:18px;height:18px;font-size:8px">${ini(prevEng)}</div>${prevEng.split(' ')[0]}</div></td>
       <td style="color:var(--t3);font-size:10px;padding:0 4px">→</td>
-      <td><div class="ech" style="background:${nc}18;color:${nc};display:inline-flex;padding:2px 7px 2px 4px;border:1px solid ${nc}55"><div class="eav" style="background:${nc};width:18px;height:18px;font-size:8px">${ini(newEng)}</div><strong>${newEng.split(' ')[0]}</strong></div></td>
+      <td>
+        <div class="ech" style="background:${nc}18;color:${nc};display:inline-flex;padding:2px 7px 2px 4px;border:1px solid ${nc}55"><div class="eav" style="background:${nc};width:18px;height:18px;font-size:8px">${ini(newEng)}</div><strong>${newEng.split(' ')[0]}</strong></div>
+        ${reasonTxt?`<div style="font-size:10px;color:var(--t3);margin-top:2px">${reasonTxt}</div>`:''}
+      </td>
     </tr>`;
   }).join('');
 
@@ -5278,7 +5362,7 @@ if(typeof renderTlDay==='function'){
     <div class="sched-modal-body">
       <div class="sa-count" id="suggestCount"></div>
       <table class="suggest-tbl">
-        <thead><tr><th>Job</th><th>Customer</th><th>Time</th><th>Current</th><th></th><th>Suggested</th></tr></thead>
+        <thead><tr><th>Job</th><th>Customer</th><th>Time</th><th>Current</th><th></th><th>Suggested · Reason</th></tr></thead>
         <tbody id="suggestBody"></tbody>
       </table>
     </div>
