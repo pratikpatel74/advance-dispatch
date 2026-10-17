@@ -4444,7 +4444,9 @@ async function loadBulkJobs(){
       }));
     BA.selections={};
     countEl.textContent=`${BA.jobs.length.toLocaleString()} unallocated jobs`;
-    // Ensure engineers are loaded
+    // Ensure skills are loaded from Supabase BEFORE building ENG_DATA
+    await loadFromSupabase();
+    window._engTs=0; // force ENG_DATA rebuild so e.skills is populated
     await loadEngineers();
     renderBulkTable();
   }catch(e){console.error(e);countEl.textContent='Error loading';}
