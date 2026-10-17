@@ -634,6 +634,7 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
     <button class="ntab" id="ntSkills" onclick="setAppView('skills')">Skills</button>
     <button class="ntab" id="ntPostcodes" onclick="setAppView('postcodes')" style="display:none">Postcodes</button>
     <button class="ntab" id="ntCustomers" onclick="setAppView('customers')">Customers</button>
+    <button class="ntab" id="ntBulk" onclick="setAppView('bulk')">Bulk Assign</button>
   </div>
   <div class="nav-sp"></div>
   <div class="api-pill">
@@ -919,6 +920,31 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
     <div style="flex:1;overflow-y:auto;padding-bottom:24px">
       <div class="cust-grid" id="custGrid"></div>
       <div class="list-tbl-wrap" id="custTbl" style="display:none"></div>
+    </div>
+  </div>
+
+  <!-- Bulk Assign View -->
+  <div class="mgmt-v" id="bulkV" style="padding:0;overflow:hidden">
+    <!-- Toolbar -->
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 24px;background:var(--surf);border-bottom:1px solid var(--bdr);flex-shrink:0;flex-wrap:wrap">
+      <div style="font-family:'IBM Plex Sans',sans-serif;font-weight:700;font-size:15px;color:var(--t1)">Bulk Assign</div>
+      <div style="width:1px;height:20px;background:var(--bdr)"></div>
+      <span style="font-size:11px;font-weight:600;color:var(--t3);font-family:'IBM Plex Sans',sans-serif">From</span>
+      <input type="date" id="baFrom" style="height:32px;padding:0 10px;border:1px solid var(--bdr);border-radius:var(--rs);background:var(--surf);color:var(--t1);font-size:12px;font-family:'IBM Plex Sans',sans-serif;outline:none">
+      <span style="font-size:11px;font-weight:600;color:var(--t3);font-family:'IBM Plex Sans',sans-serif">To</span>
+      <input type="date" id="baTo" style="height:32px;padding:0 10px;border:1px solid var(--bdr);border-radius:var(--rs);background:var(--surf);color:var(--t1);font-size:12px;font-family:'IBM Plex Sans',sans-serif;outline:none">
+      <button onclick="loadBulkJobs()" style="height:32px;padding:0 14px;background:var(--brand);border:none;border-radius:var(--rs);color:#fff;font-size:12px;font-weight:600;font-family:'IBM Plex Sans',sans-serif;cursor:pointer">Load Jobs</button>
+      <div style="width:1px;height:20px;background:var(--bdr)"></div>
+      <span id="baCount" style="font-size:12px;color:var(--t3);font-family:'IBM Plex Sans',sans-serif"></span>
+      <div style="flex:1"></div>
+      <span id="baSelected" style="font-size:12px;font-weight:600;color:var(--brand);font-family:'IBM Plex Sans',sans-serif"></span>
+      <button id="baConfirmBtn" onclick="confirmBulkAssign()" style="display:none;height:32px;padding:0 18px;background:#1AB37A;border:none;border-radius:var(--rs);color:#fff;font-size:12px;font-weight:700;font-family:'IBM Plex Sans',sans-serif;cursor:pointer">
+        ✓ Confirm All Selections
+      </button>
+    </div>
+    <!-- Table -->
+    <div style="flex:1;overflow-y:auto">
+      <div id="baBody" style="padding:0"></div>
     </div>
   </div>
 
@@ -2334,9 +2360,9 @@ async function reassign(id,e){
 }
 
 /* ── APP-LEVEL NAV ── */
-const APP_VIEWS=['planner','engineers','availability','skills','postcodes','customers'];
-const NTAB_IDS={planner:'ntPlanner',engineers:'ntEngineers',availability:'ntAvail',skills:'ntSkills',postcodes:'ntPostcodes',customers:'ntCustomers'};
-const MGMT_IDS={engineers:'engineersV',availability:'availabilityV',skills:'skillsV',postcodes:'postcodesV',customers:'customersV'};
+const APP_VIEWS=['planner','engineers','availability','skills','postcodes','customers','bulk'];
+const NTAB_IDS={planner:'ntPlanner',engineers:'ntEngineers',availability:'ntAvail',skills:'ntSkills',postcodes:'ntPostcodes',customers:'ntCustomers',bulk:'ntBulk'};
+const MGMT_IDS={engineers:'engineersV',availability:'availabilityV',skills:'skillsV',postcodes:'postcodesV',customers:'customersV',bulk:'bulkV'};
 
 function setAppView(v){
   APP_VIEW=v;
@@ -2364,6 +2390,7 @@ function setAppView(v){
   else if(v==='skills'){loadEngineers().then(renderSkills);}
   else if(v==='postcodes'){loadEngineers().then(renderPostcodes);}
   else if(v==='customers'){renderCustomers();}
+  else if(v==='bulk'){initBulkAssign();}
 }
 
 /* ── ENGINEER DATA ── */
@@ -4370,6 +4397,160 @@ function filterList(){
     return true;
   });
   renderList();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   BULK ASSIGN
+   ══════════════════════════════════════════════════════════════ */
+const BA={jobs:[],selections:{}}; // selections: {jobId: engineerName}
+
+function initBulkAssign(){
+  const fromEl=document.getElementById('baFrom'),toEl=document.getElementById('baTo');
+  if(fromEl&&!fromEl.value){
+    const today=new Date(),end=new Date(today);end.setDate(end.getDate()+30);
+    fromEl.value=today.toISOString().slice(0,10);
+    toEl.value=end.toISOString().slice(0,10);
+  }
+  if(BA.jobs.length)renderBulkTable();
+}
+
+async function loadBulkJobs(){
+  const from=document.getElementById('baFrom').value,to=document.getElementById('baTo').value;
+  if(!from||!to){toast('Select a date range first');return;}
+  const countEl=document.getElementById('baCount');
+  countEl.textContent='Loading…';
+  document.getElementById('baBody').innerHTML='<div style="padding:40px;text-align:center;color:var(--t3);font-family:IBM Plex Sans,sans-serif">Loading jobs…</div>';
+  const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
+  const sm={'Allocated':'D','Attended':'D','Scheduled':'D','Unallocated':'O','Awaiting Parts':'O','Awaiting Invoice Approval':'O','Complete':'C','Completed':'C','Cannot Complete':'X'};
+  try{
+    const url=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,address,postcode,latitude,longitude,engineer_name,status,call_type,scheduled_time,description,category,required_skills&cancelled=eq.0&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59&order=scheduled_time.asc&limit=2000`;
+    const r=await fetch(url,{signal:AbortSignal.timeout(12000),headers:hdr});
+    if(!r.ok){countEl.textContent=`Error ${r.status}`;return;}
+    const rows=await r.json();
+    BA.jobs=rows
+      .filter(row=>{const s=sm[row.status]||'O';return s!=='C'&&(!row.engineer_name||row.engineer_name===''||row.engineer_name==='Unassigned');})
+      .map((row,i)=>({
+        id:String(row.call_id||row.id),
+        customerName:row.customer_name||'Unknown',
+        address:row.postcode||row.address||'',
+        scheduledTime:row.scheduled_time||'',
+        jobType:row.call_type==='PPM'?'PPM':'Reactive',
+        requiredSkills:(row.required_skills&&row.required_skills.length>0)?row.required_skills:(row.category?[row.category]:[]),
+        lat:row.latitude||null,lon:row.longitude||null,
+        estimatedDuration:60,description:row.description||'',
+        engineer:'Unassigned',status:sm[row.status]||'O',parts:[],labour:[],
+        sequence:i,priority:'medium',drivingTime:0,distanceM:0
+      }));
+    BA.selections={};
+    countEl.textContent=`${BA.jobs.length.toLocaleString()} unallocated jobs`;
+    // Ensure engineers are loaded
+    await loadEngineers();
+    renderBulkTable();
+  }catch(e){console.error(e);countEl.textContent='Error loading';}
+}
+
+function getBulkSuggestions(job){
+  if(!ENG_DATA||!ENG_DATA.length)return[];
+  return ENG_DATA
+    .map(e=>scoreEngineerForJob(e,job,{penalise:false})||scoreEngineerForJob(e,job,{penalise:true}))
+    .filter(r=>r&&r.score>0&&!r.blocked)
+    .sort((a,b)=>b.score-a.score)
+    .slice(0,3);
+}
+
+function renderBulkTable(){
+  const el=document.getElementById('baBody');
+  if(!el)return;
+  if(!BA.jobs.length){el.innerHTML='<div style="padding:40px;text-align:center;color:var(--t3);font-family:IBM Plex Sans,sans-serif">No unallocated jobs found for this date range.</div>';return;}
+  const selectedCount=Object.keys(BA.selections).length;
+  const selEl=document.getElementById('baSelected');
+  if(selEl)selEl.textContent=selectedCount?`${selectedCount} selected`:'';
+  const btn=document.getElementById('baConfirmBtn');
+  if(btn)btn.style.display=selectedCount?'':'none';
+
+  const rows=BA.jobs.map(job=>{
+    const suggestions=getBulkSuggestions(job);
+    const date=job.scheduledTime?new Date(job.scheduledTime).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}):'—';
+    const time=job.scheduledTime?new Date(job.scheduledTime).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'';
+    const skills=(job.requiredSkills||[]).map(s=>`<span style="font-size:10px;padding:2px 6px;background:var(--s-d-bg);color:var(--s-d-fg);border-radius:3px;white-space:nowrap">${s}</span>`).join('');
+    const selEng=BA.selections[job.id];
+
+    const engCards=suggestions.map(r=>{
+      const isSelected=selEng===r.name;
+      const skillPct=Math.round((r.breakdown?.skill||0)/30*100);
+      const distPct=Math.round((r.breakdown?.dist||0)/25*100);
+      const availPct=Math.round((r.breakdown?.avail||0)/20*100);
+      const col=ec(r.name);
+      const ini=r.name.split(' ').map(w=>w[0]||'').join('').slice(0,2).toUpperCase();
+      return`<div onclick="selectBulkEngineer('${job.id}','${r.name.replace(/'/g,"\\'")}')"
+        style="display:inline-flex;flex-direction:column;gap:4px;padding:8px 10px;border-radius:6px;border:2px solid ${isSelected?col:'var(--bdr)'};background:${isSelected?col+'18':'var(--bg)'};cursor:pointer;min-width:130px;transition:all .15s;vertical-align:top">
+        <div style="display:flex;align-items:center;gap:6px">
+          <div style="width:22px;height:22px;border-radius:50%;background:${col};color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${ini}</div>
+          <span style="font-size:11px;font-weight:600;color:var(--t1);font-family:'IBM Plex Sans',sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px">${r.name.split(' ')[0]}</span>
+          <span style="margin-left:auto;font-size:10px;font-weight:700;color:${isSelected?col:'var(--brand)'};">${Math.round(r.score)}%</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:2px">
+          ${[['Skill',skillPct,'#1AB37A'],['Dist',distPct,'#2E7CF6'],['Avail',availPct,'#E8A020']].map(([lbl,pct,c])=>`
+          <div style="display:flex;align-items:center;gap:4px">
+            <span style="font-size:9px;color:var(--t4);font-family:'IBM Plex Mono',monospace;width:26px">${lbl}</span>
+            <div style="flex:1;height:3px;background:var(--bdr);border-radius:2px"><div style="height:3px;width:${pct}%;background:${c};border-radius:2px"></div></div>
+            <span style="font-size:9px;color:var(--t3);font-family:'IBM Plex Mono',monospace;width:24px;text-align:right">${pct}%</span>
+          </div>`).join('')}
+        </div>
+      </div>`;
+    }).join('&nbsp;');
+
+    const noSug=!suggestions.length?'<span style="font-size:11px;color:var(--t4);font-family:IBM Plex Sans,sans-serif">No eligible engineers</span>':'';
+    const confirmed=selEng?`<span style="font-size:11px;font-weight:600;color:#1AB37A;font-family:IBM Plex Sans,sans-serif">✓ ${selEng}</span>`:'';
+
+    return`<div style="display:grid;grid-template-columns:80px 1fr 1fr 2fr 60px;align-items:start;gap:12px;padding:12px 24px;border-bottom:1px solid var(--bdr);background:${selEng?'var(--s-c-bg)':'var(--surf)'}">
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--t1);font-family:'IBM Plex Mono',monospace">${date}</div>
+        <div style="font-size:11px;color:var(--t3)">${time}</div>
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--t1);font-family:'IBM Plex Sans',sans-serif;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.customerName}</div>
+        <div style="font-size:11px;color:var(--t3);font-family:'IBM Plex Mono',monospace">${job.address}</div>
+        <div style="font-size:10px;color:var(--t4);margin-top:2px">${job.id} · ${job.jobType}</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:3px;align-content:start">${skills||'<span style="font-size:10px;color:var(--t4)">—</span>'}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${engCards}${noSug}</div>
+      <div style="text-align:right">${confirmed}</div>
+    </div>`;
+  }).join('');
+
+  // Header
+  el.innerHTML=`<div style="display:grid;grid-template-columns:80px 1fr 1fr 2fr 60px;gap:12px;padding:8px 24px;background:var(--surf2);border-bottom:2px solid var(--bdr);position:sticky;top:0;z-index:2">
+    ${['Date','Customer','Skills Needed','Top 3 Engineers',''].map(h=>`<div style="font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;font-family:'IBM Plex Sans',sans-serif">${h}</div>`).join('')}
+  </div>${rows}`;
+}
+
+function selectBulkEngineer(jobId, engName){
+  if(BA.selections[jobId]===engName){delete BA.selections[jobId];}
+  else{BA.selections[jobId]=engName;}
+  renderBulkTable();
+}
+
+async function confirmBulkAssign(){
+  const entries=Object.entries(BA.selections);
+  if(!entries.length){toast('Nothing selected');return;}
+  const btn=document.getElementById('baConfirmBtn');
+  btn.textContent='Saving…';btn.disabled=true;
+  const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
+  let ok=0,fail=0;
+  for(const[jobId,engName]of entries){
+    try{
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify({engineer_name:engName,status:'Allocated'})});
+      if(r.ok){ok++;const j=BA.jobs.find(x=>x.id===jobId);if(j)j.engineer=engName;}
+      else fail++;
+    }catch{fail++;}
+  }
+  BA.jobs=BA.jobs.filter(j=>!BA.selections[j.id]);
+  BA.selections={};
+  btn.textContent='✓ Confirm All Selections';btn.disabled=false;
+  toast(fail?`✓ ${ok} assigned, ${fail} failed`:`✓ ${ok} jobs assigned`);
+  document.getElementById('baCount').textContent=`${BA.jobs.length.toLocaleString()} unallocated jobs`;
+  renderBulkTable();
 }
 
 function setView(v){
