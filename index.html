@@ -738,7 +738,7 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
     <input class="sinp" id="qI" type="text" placeholder="Customer, address, ID…" oninput="filter()">
   </div>
   <div class="tsep"></div>
-  <div class="date-nav">
+  <div class="date-nav" id="singleDateNav">
     <button class="dnavbtn" onclick="changeDate(-1)" title="Previous working day">
       <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
@@ -746,6 +746,13 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
     <button class="dnavbtn" onclick="changeDate(1)" title="Next working day">
       <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
     </button>
+  </div>
+  <div style="display:none;align-items:center;gap:6px" id="listDateRange">
+    <span style="font-size:11px;font-weight:600;color:var(--t3);font-family:'IBM Plex Sans',sans-serif">From</span>
+    <input class="date-inp" id="listFrom" type="date" style="border:1px solid var(--bdr);border-radius:var(--rs);padding:0 8px;min-width:120px" onchange="loadListData()">
+    <span style="font-size:11px;font-weight:600;color:var(--t3);font-family:'IBM Plex Sans',sans-serif">To</span>
+    <input class="date-inp" id="listTo" type="date" style="border:1px solid var(--bdr);border-radius:var(--rs);padding:0 8px;min-width:120px" onchange="loadListData()">
+    <span id="listCount" style="font-size:11px;color:var(--t3);font-family:'IBM Plex Sans',sans-serif;white-space:nowrap"></span>
   </div>
   <div class="tsp"></div>
   <button class="rbtn" onclick="load()">
@@ -1702,6 +1709,7 @@ function toggleHideClosed(){
   filter();
 }
 function filter(){
+  if(S.view==='list'){filterList();return;}
   const e=document.getElementById('eF').value,s=document.getElementById('sF').value,q=document.getElementById('qI').value.toLowerCase().trim();
   S.fil=S.calls.filter(c=>{
     if(e&&eng(c)!==e)return false;
@@ -3988,8 +3996,7 @@ function renderMap(){
   // Init Leaflet
   _map=L.map('leafletMap',{zoomControl:true,attributionControl:true});
   // Stadia Maps — Alidade Smooth, domain-auth via *.167.233.160.227
-  // Fallback OSM: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',maxZoom:19}).addTo(_map);
-  L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png',{
+  L.tileLayer('https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png?api_key=2d0ad031-42b2-4940-8885-01d3c3da7637',{
     attribution:'© <a href="https://stadiamaps.com/">Stadia Maps</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxZoom:20
   }).addTo(_map);
@@ -4313,8 +4320,64 @@ function renderCustomers(){
 }
 
 /* ── VIEW ── */
+async function loadListData(){
+  const fromEl=document.getElementById('listFrom'),toEl=document.getElementById('listTo');
+  if(!fromEl||!toEl||!fromEl.value||!toEl.value)return;
+  const d0=fromEl.value+'T00:00:00',d1=toEl.value+'T23:59:59';
+  const countEl=document.getElementById('listCount');
+  if(countEl)countEl.textContent='Loading…';
+  const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
+  const sm={'Allocated':'D','Attended':'D','Scheduled':'D','Unallocated':'O','Awaiting Parts':'O','Awaiting Invoice Approval':'O','Complete':'C','Completed':'C','Cannot Complete':'X'};
+  const toJob=(row,i)=>({
+    id:String(row.call_id||row.id),vtid:String(row.call_id||row.id),
+    customerName:row.customer_name||'Unknown',address:row.postcode||row.address||'',
+    engineer:row.engineer_name||'Unassigned',fmExtId:String(row.engineer_id||''),
+    status:sm[row.status]||'O',scheduledTime:row.scheduled_time||'',
+    estimatedDuration:60,drivingTime:0,distanceM:0,sequence:i,priority:'medium',
+    requiredSkills:(row.required_skills&&row.required_skills.length>0)?row.required_skills:(row.category?[row.category]:[]),
+    jobType:row.call_type==='PPM'?'Planned Maintenance':'Reactive Service',
+    description:row.description||'',notes:row.engineer_notes||'',
+    lat:row.latitude||null,lon:row.longitude||null,parts:[],labour:[]
+  });
+  try{
+    const base=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,site_name,address,postcode,latitude,longitude,engineer_id,engineer_name,status,call_type,scheduled_time,cal_opened,completed_at,actual_start,actual_end,sla_due,cancelled,description,engineer_notes,category,required_skills&cancelled=eq.0&scheduled_time=gte.${d0}&scheduled_time=lte.${d1}&order=scheduled_time.asc`;
+    const r1=await fetch(base+'&limit=2000&offset=0',{signal:AbortSignal.timeout(12000),headers:hdr});
+    if(!r1.ok){if(countEl)countEl.textContent=`Error ${r1.status}`;return;}
+    const rows1=await r1.json();
+    let rows=rows1;
+    if(rows1.length===2000){
+      const r2=await fetch(base+'&limit=2000&offset=2000',{signal:AbortSignal.timeout(12000),headers:hdr});
+      if(r2.ok){const rows2=await r2.json();rows=[...rows1,...rows2];}
+    }
+    S.listCalls=rows.map(toJob);
+    if(countEl)countEl.textContent=`${S.listCalls.length.toLocaleString()} jobs`;
+    filterList();
+  }catch(e){
+    console.error('List fetch failed',e);
+    if(countEl)countEl.textContent='Error loading';
+  }
+}
+
+function filterList(){
+  const e=document.getElementById('eF').value,s=document.getElementById('sF').value,q=document.getElementById('qI').value.toLowerCase().trim();
+  S.fil=(S.listCalls||[]).filter(c=>{
+    if(e&&eng(c)!==e)return false;
+    if(s==='O_ALLOC'){const en=eng(c);if(c.status!=='O'||!en||en==='Unassigned'||en==='unassigned')return false;}
+    else if(s==='O_UNALLOC'){const en=eng(c);if(c.status!=='O'||(en&&en!=='Unassigned'&&en!=='unassigned'))return false;}
+    else if(s&&c.status!==s)return false;
+    if(hideClosedActive&&!s&&c.status==='C')return false;
+    if(q){const h=[c.customerName||'',c.address||'',c.id||''].join(' ').toLowerCase();if(!h.includes(q))return false;}
+    return true;
+  });
+  renderList();
+}
+
 function setView(v){
   S.view=v;
+  // Show/hide single date nav vs list date range
+  const sdn=document.getElementById('singleDateNav'),ldr=document.getElementById('listDateRange');
+  if(sdn)sdn.style.display=v==='list'?'none':'flex';
+  if(ldr)ldr.style.display=v==='list'?'flex':'none';
   // Only toggle if we're in the planner tab
   if(APP_VIEW==='planner'){
     document.getElementById('bv').style.display=(v==='board')?'flex':'none';
@@ -4327,7 +4390,16 @@ function setView(v){
   document.getElementById('bMap').className='vbtn'+(v==='map'?' on':'');
   const bList=document.getElementById('bList');if(bList)bList.className='vbtn'+(v==='list'?' on':'');
   const sw=document.getElementById('tlSpSw');if(sw)sw.className='tl-span-sw'+(v==='tl'?' vis':'');
-  if(v==='map'){
+  if(v==='list'){
+    // Initialise date range if not set (today → +30 days)
+    const fromEl=document.getElementById('listFrom'),toEl=document.getElementById('listTo');
+    if(fromEl&&!fromEl.value){
+      const today=new Date();const end=new Date(today);end.setDate(end.getDate()+30);
+      fromEl.value=today.toISOString().slice(0,10);
+      toEl.value=end.toISOString().slice(0,10);
+    }
+    loadListData();
+  } else if(v==='map'){
     setTimeout(()=>{renderMap();setTimeout(()=>{if(_map){_map.invalidateSize();refreshMapMarkers();}},250);},50);
   } else if(v==='tl'&&TL_SPAN!=='day'){
     loadAndRenderTl();
