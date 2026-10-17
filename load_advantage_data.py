@@ -117,6 +117,46 @@ def to_date(val):
     return None
 
 
+import re as _re
+
+def infer_skills_from_description(desc):
+    """Mirror of the SQL infer_skills_from_description() function.
+    Returns a list of skill names inferred from the job description text."""
+    if not desc:
+        return []
+    d = desc.lower()
+    skills = []
+    if _re.search(r'(fridge|refrigerat|freezer|cold room|bottle cooler|ice machine|chiller|cold stor|walk.in.cold)', d):
+        skills.append('Refrigeration')
+    if _re.search(r'(dishwasher|glasswasher|warewasher|rack washer|dish wash|glass wash)', d):
+        skills.append('Warewashing')
+    if _re.search(r'(combi|rational|convotherm|combination oven|combisteamer|combi oven|combimaster|icombi)', d):
+        skills.append('Combi')
+    if _re.search(r'(microwave)', d):
+        skills.append('Microwave')
+    if _re.search(r'(boiler|water boiler|hot water urn|hot water unit|table.?top boiler|wall.?mount.?boiler)', d):
+        skills.append('Water Boilers')
+    if _re.search(r'(extract|canopy|ventilat|exhaust fan|ductwork)', d):
+        skills.append('Extraction')
+    if _re.search(r'(air con|air-con|aircon|a/c unit|hvac|split unit|air conditioning)', d):
+        skills.append('Air Con')
+    if _re.search(r'(insect|fly trap|flytrap|fly killer|fly strip|executor|exocutor|electrocutor|uv lamp|insect.?cutor|bug killer)', d):
+        skills.append('Insect Killer')
+    if _re.search(r'(waste disposal|macerator|food waste|garbage disposal)', d):
+        skills.append('Waste Disposal')
+    if _re.search(r'(gantry)', d):
+        skills.append('Gantry')
+    if _re.search(r'(holding unit|hot cupboard|thermodyne|holding cabinet|bain marie|hot hold)', d):
+        skills.append('Holding Unit')
+    if _re.search(r'(fryer|griddle|bratt pan|wok|range|burner|salamander|convect|oven|grill|planchas|broiler|char.?grill|steamer|pasta cooker|chip scuttle)', d):
+        skills.append('Prime Cooking')
+    if _re.search(r'(mixer|blender|food processor|slicer|cutter|peeler|rumbler|mince|dough|mincer|grinder|chopper|mandolin)', d):
+        skills.append('Prep')
+    if _re.search(r'(gas leak|gas supply|gas pressure|gas pipe|gas main|lpg|natural gas|gas interlock)', d):
+        skills.append('Gas')
+    return skills
+
+
 def batch_upsert(client, table, rows, dry_run=False, on_conflict="id"):
     """Upsert rows in batches. Returns total inserted."""
     total = 0
@@ -333,6 +373,7 @@ def main():
             "completion_status": str_or_none(row[21]),
             "fault_outcome":     str_or_none(row[22]),
             "category":          str_or_none(row[23]),
+            "required_skills":   infer_skills_from_description(str_or_none(row[19])),
         })
 
     print(f"  Calls matched to our engineers: {len(adv_calls_rows):,}")

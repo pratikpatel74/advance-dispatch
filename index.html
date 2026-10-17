@@ -1568,7 +1568,7 @@ async function load(){
     try{
       const d0=SELECTED_DATE+'T00:00:00';
       const d1=SELECTED_DATE+'T23:59:59';
-      const qurl=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,site_name,address,postcode,latitude,longitude,engineer_id,engineer_name,status,call_type,scheduled_time,cal_opened,completed_at,actual_start,actual_end,sla_due,cancelled,description,engineer_notes,category&cancelled=eq.0&scheduled_time=gte.${d0}&scheduled_time=lte.${d1}&order=scheduled_time.asc&limit=1000`;
+      const qurl=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,site_name,address,postcode,latitude,longitude,engineer_id,engineer_name,status,call_type,scheduled_time,cal_opened,completed_at,actual_start,actual_end,sla_due,cancelled,description,engineer_notes,category,required_skills&cancelled=eq.0&scheduled_time=gte.${d0}&scheduled_time=lte.${d1}&order=scheduled_time.asc&limit=1000`;
       const sbr=await fetch(qurl,{signal:AbortSignal.timeout(8000),headers:{'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY}});
       if(sbr.ok){
         const rows=await sbr.json();
@@ -1586,7 +1586,7 @@ async function load(){
           scheduledTime: row.scheduled_time||'',
           estimatedDuration: 60,
           drivingTime:0,distanceM:0,sequence:i,priority:'medium',
-          requiredSkills: row.category?[row.category]:[],
+          requiredSkills: (row.required_skills&&row.required_skills.length>0)?row.required_skills:(row.category?[row.category]:[]),
           jobType:       row.call_type==='PPM'?'Planned Maintenance':'Reactive Service',
           description:   row.description||'',
           notes:         row.engineer_notes||'',
