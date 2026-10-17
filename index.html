@@ -938,6 +938,7 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
       <span id="baCount" style="font-size:12px;color:var(--t3);font-family:'IBM Plex Sans',sans-serif"></span>
       <div style="flex:1"></div>
       <span id="baSelected" style="font-size:12px;font-weight:600;color:var(--brand);font-family:'IBM Plex Sans',sans-serif"></span>
+      <button onclick="selectAllBest()" style="height:32px;padding:0 14px;border:1px solid var(--bdr);border-radius:var(--rs);background:var(--surf);color:var(--t2);font-size:12px;font-weight:600;font-family:'IBM Plex Sans',sans-serif;cursor:pointer" title="Auto-select top suggestion for every job">⚡ Select All Best</button>
       <button id="baConfirmBtn" onclick="confirmBulkAssign()" style="display:none;height:32px;padding:0 18px;background:#1AB37A;border:none;border-radius:var(--rs);color:#fff;font-size:12px;font-weight:700;font-family:'IBM Plex Sans',sans-serif;cursor:pointer">
         ✓ Confirm All Selections
       </button>
@@ -4501,9 +4502,15 @@ function renderBulkTable(){
     }).join('&nbsp;');
 
     const noSug=!suggestions.length?'<span style="font-size:11px;color:var(--t4);font-family:IBM Plex Sans,sans-serif">No eligible engineers</span>':'';
-    const confirmed=selEng?`<span style="font-size:11px;font-weight:600;color:#1AB37A;font-family:IBM Plex Sans,sans-serif">✓ ${selEng}</span>`:'';
+    const rowConfirmBtn=selEng
+      ?`<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <span style="font-size:11px;font-weight:600;color:#1AB37A;font-family:IBM Plex Sans,sans-serif;white-space:nowrap">✓ ${selEng.split(' ')[0]}</span>
+          <button onclick="confirmSingleJob('${job.id}')" style="font-size:10px;font-weight:700;padding:3px 8px;background:#1AB37A;border:none;border-radius:4px;color:#fff;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;white-space:nowrap">Save</button>
+          <button onclick="clearBulkSelection('${job.id}')" style="font-size:10px;padding:2px 6px;background:transparent;border:1px solid var(--bdr);border-radius:4px;color:var(--t3);cursor:pointer;font-family:'IBM Plex Sans',sans-serif">✕</button>
+        </div>`
+      :'';
 
-    return`<div style="display:grid;grid-template-columns:80px 1fr 1fr 2fr 60px;align-items:start;gap:12px;padding:12px 24px;border-bottom:1px solid var(--bdr);background:${selEng?'var(--s-c-bg)':'var(--surf)'}">
+    return`<div style="display:grid;grid-template-columns:80px 1fr 1fr 2fr 80px;align-items:start;gap:12px;padding:12px 24px;border-bottom:1px solid var(--bdr);background:${selEng?'var(--s-c-bg)':'var(--surf)'}">
       <div>
         <div style="font-size:12px;font-weight:600;color:var(--t1);font-family:'IBM Plex Mono',monospace">${date}</div>
         <div style="font-size:11px;color:var(--t3)">${time}</div>
@@ -4515,7 +4522,7 @@ function renderBulkTable(){
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:3px;align-content:start">${skills||'<span style="font-size:10px;color:var(--t4)">—</span>'}</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap">${engCards}${noSug}</div>
-      <div style="text-align:right">${confirmed}</div>
+      <div style="text-align:right">${rowConfirmBtn}</div>
     </div>`;
   }).join('');
 
@@ -4529,6 +4536,36 @@ function selectBulkEngineer(jobId, engName){
   if(BA.selections[jobId]===engName){delete BA.selections[jobId];}
   else{BA.selections[jobId]=engName;}
   renderBulkTable();
+}
+
+function clearBulkSelection(jobId){
+  delete BA.selections[jobId];
+  renderBulkTable();
+}
+
+function selectAllBest(){
+  BA.jobs.forEach(job=>{
+    const top=getBulkSuggestions(job)[0];
+    if(top)BA.selections[job.id]=top.name;
+  });
+  renderBulkTable();
+  toast(`⚡ ${Object.keys(BA.selections).length} jobs auto-selected`);
+}
+
+async function confirmSingleJob(jobId){
+  const engName=BA.selections[jobId];
+  if(!engName){toast('Select an engineer first');return;}
+  const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
+  try{
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify({engineer_name:engName,status:'Allocated'})});
+    if(r.ok){
+      BA.jobs=BA.jobs.filter(j=>j.id!==jobId);
+      delete BA.selections[jobId];
+      document.getElementById('baCount').textContent=`${BA.jobs.length.toLocaleString()} unallocated jobs`;
+      toast(`✓ Assigned to ${engName}`);
+      renderBulkTable();
+    }else{toast('Save failed');}
+  }catch{toast('Save failed');}
 }
 
 async function confirmBulkAssign(){
