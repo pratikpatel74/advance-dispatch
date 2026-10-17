@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+*.egg-info/
+
+# Secrets / credentials
+*.key
+*.pem
+secrets.py
+
+# Data files (not for hosting)
+*.db
+*.sqlite
+*.xlsx
+*.zip
+*.pptx
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (if ever used)
+node_modules/
