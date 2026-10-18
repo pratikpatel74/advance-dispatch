@@ -2415,15 +2415,21 @@ async function loadFromSupabase(){
   // 1. Engineer metadata (department, visitour_id, brighthr_id)
   try{
     const r=await fetch(
-      `${SUPABASE_URL}/rest/v1/adv_engineers?select=name,department,visitour_id,brighthr_id&order=name.asc&limit=100`,
+      `${SUPABASE_URL}/rest/v1/adv_engineers?select=adv_name,department,visitour_id,brighthr_id,postcode,home_lat,home_lon&order=adv_name.asc&limit=100`,
       {headers:SB_HDR,signal:AbortSignal.timeout(8000)});
     if(r.ok){
       const rows=await r.json();
       rows.forEach(row=>{
-        if(!ENG_CONFIG[row.name])ENG_CONFIG[row.name]={};
-        if(row.department)ENG_CONFIG[row.name].department=row.department;
-        if(row.visitour_id)ENG_CONFIG[row.name].visitourId=row.visitour_id;
-        if(row.brighthr_id)ENG_CONFIG[row.name].brighthrId=row.brighthr_id;
+        const n=row.adv_name;
+        if(!n)return;
+        if(!ENG_CONFIG[n])ENG_CONFIG[n]={};
+        if(row.department)ENG_CONFIG[n].department=row.department;
+        if(row.visitour_id)ENG_CONFIG[n].visitourId=row.visitour_id;
+        if(row.brighthr_id)ENG_CONFIG[n].brighthrId=row.brighthr_id;
+        // Home location for distance scoring
+        if(row.home_lat&&row.home_lon){
+          ENG_HOMES[n]={lat:row.home_lat,lng:row.home_lon,postcode:row.postcode||'',travelRadius:150};
+        }
       });
       console.log(`Supabase: loaded ${rows.length} engineer records`);
     }
