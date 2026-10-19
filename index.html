@@ -195,6 +195,7 @@ select.fil:focus{border-color:var(--brand)}
 .spbtn{padding:4px 11px;border:none;background:transparent;border-radius:4px;font-size:12px;font-weight:600;color:var(--t3);cursor:pointer;font-family:'IBM Plex Sans',sans-serif;transition:all .15s}
 .spbtn:hover{color:var(--t2)}
 .spbtn.on{background:var(--surf);color:var(--brand);box-shadow:var(--sh-xs)}
+.spbtn-custom{display:inline-flex;align-items:center}
 
 /* ── MULTI-DAY GRID ── */
 .tl-mg{min-width:800px}
@@ -714,9 +715,13 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
   <div class="tl-span-sw" id="tlSpSw">
     <button class="spbtn on" id="spD" onclick="setSpan('day')">Day</button>
     <button class="spbtn" id="spW" onclick="setSpan('week')">Week</button>
+    <button class="spbtn" id="sp2w" onclick="setSpan('2w')">2 Weeks</button>
     <button class="spbtn" id="spM" onclick="setSpan('month')">Month</button>
-    <button class="spbtn" id="sp3" onclick="setSpan('3m')">3M</button>
+    <span class="spbtn-custom" id="spCustomWrap">
+      <button class="spbtn" id="spC" onclick="setSpan('custom')" style="border-right:none;border-radius:6px 0 0 6px;padding-right:4px">Custom</button><span style="display:flex;align-items:center;border:1px solid var(--bdr2);border-left:none;border-radius:0 6px 6px 0;background:var(--surf);height:28px;padding:0 2px;gap:1px"><button onclick="adjustCustomDays(-1)" style="background:none;border:none;cursor:pointer;color:var(--t3);font-size:13px;padding:0 3px;line-height:1" title="Fewer days">−</button><span id="customDaysLbl" style="font-size:11px;font-weight:600;color:var(--t2);min-width:14px;text-align:center">5</span><button onclick="adjustCustomDays(1)" style="background:none;border:none;cursor:pointer;color:var(--t3);font-size:13px;padding:0 3px;line-height:1" title="More days">+</button></span>
+    </span>
   </div>
+  <button class="opt-btn sec" id="todayBtn" onclick="goToday()" title="Jump to today" style="margin-left:2px">Today</button>
   <div class="tsep"></div>
   <select class="fil" id="eF" onchange="filter()">
     <option value="">All Engineers</option>
@@ -1544,6 +1549,7 @@ const MOCK=[
 /* ── STATE ── */
 const S={calls:[],fil:[],engs:[],cm:{},selId:null,view:'board',live:false};
 let TL_SPAN='day';
+let TL_CUSTOM_DAYS=5;
 let APP_VIEW='planner'; // top-level tab
 let ENG_DATA=[]; // engineer records from API
 const ALL_SKILLS=['Electrical','Mechanical','HVAC','Refrigeration','Plumbing','Safety Inspection','Hydraulics','Electronics'];
@@ -1693,13 +1699,18 @@ function changeDate(offset){
     SELECTED_DATE=d.toISOString().slice(0,10);
     const dp=document.getElementById('datePicker');if(dp)dp.value=SELECTED_DATE;
     TL_CALLS=null;loadAndRenderTl();
-  } else if(TL_SPAN==='month'){
-    d.setMonth(d.getMonth()+offset);
+  } else if(TL_SPAN==='2w'){
+    d.setDate(d.getDate()+offset*14);
     SELECTED_DATE=d.toISOString().slice(0,10);
     const dp=document.getElementById('datePicker');if(dp)dp.value=SELECTED_DATE;
     TL_CALLS=null;loadAndRenderTl();
-  } else if(TL_SPAN==='3m'){
-    d.setMonth(d.getMonth()+offset*3);
+  } else if(TL_SPAN==='custom'){
+    d.setDate(d.getDate()+offset*(TL_CUSTOM_DAYS||5));
+    SELECTED_DATE=d.toISOString().slice(0,10);
+    const dp=document.getElementById('datePicker');if(dp)dp.value=SELECTED_DATE;
+    TL_CALLS=null;loadAndRenderTl();
+  } else if(TL_SPAN==='month'){
+    d.setMonth(d.getMonth()+offset);
     SELECTED_DATE=d.toISOString().slice(0,10);
     const dp=document.getElementById('datePicker');if(dp)dp.value=SELECTED_DATE;
     TL_CALLS=null;loadAndRenderTl();
@@ -1836,9 +1847,8 @@ function renderBoard(){
 /* ── TIMELINE ── */
 function renderTimeline(){
   if(TL_SPAN==='day')renderTlDay();
-  else if(TL_SPAN==='week')renderTlWeek();
+  else if(TL_SPAN==='week'||TL_SPAN==='2w'||TL_SPAN==='custom')renderTlWeek();
   else if(TL_SPAN==='month')renderTlMonth();
-  else renderTl3M();
 }
 
 /* ── RANGE FETCH ── */
@@ -1861,13 +1871,18 @@ function getSpanRange(){
     const fri=new Date(mon);fri.setDate(mon.getDate()+4);
     return{from:mon.toISOString().slice(0,10),to:fri.toISOString().slice(0,10)};
   }
+  if(TL_SPAN==='2w'){
+    const dow=d.getDay()||7;
+    const mon=new Date(d);mon.setDate(d.getDate()-(dow-1));
+    const fri2=new Date(mon);fri2.setDate(mon.getDate()+11); // Mon + 11 = next Friday
+    return{from:mon.toISOString().slice(0,10),to:fri2.toISOString().slice(0,10)};
+  }
+  if(TL_SPAN==='custom'){
+    const end=new Date(d);end.setDate(d.getDate()+(TL_CUSTOM_DAYS||5)-1);
+    return{from:SELECTED_DATE,to:end.toISOString().slice(0,10)};
+  }
   if(TL_SPAN==='month'){
     const from=new Date(d.getFullYear(),d.getMonth(),1);
-    const to=new Date(d.getFullYear(),d.getMonth()+1,0);
-    return{from:from.toISOString().slice(0,10),to:to.toISOString().slice(0,10)};
-  }
-  if(TL_SPAN==='3m'){
-    const from=new Date(d.getFullYear(),d.getMonth()-2,1);
     const to=new Date(d.getFullYear(),d.getMonth()+1,0);
     return{from:from.toISOString().slice(0,10),to:to.toISOString().slice(0,10)};
   }
@@ -1881,12 +1896,10 @@ async function loadAndRenderTl(){
   const dl=document.getElementById('kDate');
   if(dl){
     const fmt=(ds,opts)=>new Date(ds+'T12:00:00').toLocaleDateString('en-GB',opts);
-    if(TL_SPAN==='week'){
+    if(TL_SPAN==='week'||TL_SPAN==='2w'||TL_SPAN==='custom'){
       dl.textContent=fmt(from,{day:'numeric',month:'short'})+' – '+fmt(to,{day:'numeric',month:'short'});
     }else if(TL_SPAN==='month'){
       dl.textContent=fmt(from,{month:'long',year:'numeric'});
-    }else if(TL_SPAN==='3m'){
-      dl.textContent=fmt(from,{month:'short',year:'numeric'})+' – '+fmt(to,{month:'short',year:'numeric'});
     }
   }
   let data=await fetchRange(from,to);
@@ -1929,9 +1942,20 @@ async function loadAndRenderTl(){
   // Show Confirm Week button if draft jobs exist in this range
   if(TL_SPAN!=='day')checkDraftJobs?.();
 }
+function adjustCustomDays(delta){
+  TL_CUSTOM_DAYS=Math.max(2,Math.min(7,(TL_CUSTOM_DAYS||5)+delta));
+  const lbl=document.getElementById('customDaysLbl');if(lbl)lbl.textContent=TL_CUSTOM_DAYS;
+  if(TL_SPAN==='custom'){TL_CALLS=null;loadAndRenderTl();}
+}
+function goToday(){
+  const today=new Date().toISOString().slice(0,10);
+  SELECTED_DATE=today;DAY_DATE=today;
+  const dp=document.getElementById('datePicker');if(dp)dp.value=today;
+  if(TL_SPAN==='day'){load();}else{TL_CALLS=null;loadAndRenderTl();}
+}
 function setSpan(s){
   TL_SPAN=s;TL_CALLS=null;
-  const ids={day:'spD',week:'spW',month:'spM','3m':'sp3'};
+  const ids={day:'spD',week:'spW','2w':'sp2w',month:'spM',custom:'spC'};
   Object.entries(ids).forEach(([k,id])=>{const el=document.getElementById(id);if(el)el.className='spbtn'+(s===k?' on':'');});
   if(s==='day'){
     // Restore the day-specific date — span navigation must not bleed into day view
@@ -2037,18 +2061,32 @@ function renderTlDay(){
   tl.innerHTML=head+rows;
 }
 
-/* ── TL: WEEK VIEW ── */
+/* ── TL: WEEK VIEW (also handles 2w and custom spans) ── */
 function renderTlWeek(){
   const tl=document.getElementById('tlIn');
   if(!TL_CALLS){tl.innerHTML='<div style="padding:56px;text-align:center;color:var(--t4);font-family:\'IBM Plex Sans\',sans-serif">Loading…</div>';return;}
   const anchor=new Date(SELECTED_DATE+'T12:00:00');
-  const dow=anchor.getDay()||7;
-  const mon=new Date(anchor);mon.setDate(anchor.getDate()-(dow-1));
-  TL_WEEK_MON=mon.toISOString().slice(0,10); // store for drop time calc
-  const days=Array.from({length:5},(_,i)=>{const d=new Date(mon);d.setDate(mon.getDate()+i);return d;});
+  let days;
+  if(TL_SPAN==='2w'){
+    const dow=anchor.getDay()||7;
+    const mon=new Date(anchor);mon.setDate(anchor.getDate()-(dow-1));
+    TL_WEEK_MON=mon.toISOString().slice(0,10);
+    // 10 working days: Mon-Fri of current week + Mon-Fri of next week
+    days=[];
+    for(let i=0;i<14;i++){const d=new Date(mon);d.setDate(mon.getDate()+i);if(d.getDay()!==0&&d.getDay()!==6)days.push(d);}
+  } else if(TL_SPAN==='custom'){
+    TL_WEEK_MON=SELECTED_DATE;
+    days=Array.from({length:TL_CUSTOM_DAYS||5},(_,i)=>{const d=new Date(anchor);d.setDate(anchor.getDate()+i);return d;});
+  } else {
+    const dow=anchor.getDay()||7;
+    const mon=new Date(anchor);mon.setDate(anchor.getDate()-(dow-1));
+    TL_WEEK_MON=mon.toISOString().slice(0,10);
+    days=Array.from({length:5},(_,i)=>{const d=new Date(mon);d.setDate(mon.getDate()+i);return d;});
+  }
+  const dayCount=days.length;
   const dayStrs=days.map(d=>d.toISOString().slice(0,10));
   const today=new Date().toISOString().slice(0,10);
-  const HN5=HN*5;
+  const HN5=HN*dayCount;
   // build em[engineer][dateStr] = calls[]
   const em={};ALL_ENGS.forEach(e=>{em[e]={};});
   (TL_CALLS||[]).forEach(c=>{
@@ -2063,7 +2101,7 @@ function renderTlWeek(){
   const head=`<div class="tl-hd"><div class="tl-ec">Engineer</div><div class="tl-hrs">${dayHdrs}</div></div>`;
   const rows=ALL_ENGS.map(e=>{
     const col=ec(e);
-    const gl=Array.from({length:5},(_,di)=>
+    const gl=Array.from({length:dayCount},(_,di)=>
       Array.from({length:HN},(_,hi)=>`<div class="tl-g" style="${hi===HN-1?'border-right:2px solid var(--bdr2)':''}"></div>`).join('')
     ).join('');
     const bars=[];
@@ -2105,12 +2143,12 @@ function renderTlWeek(){
     // Absence overlays for each day in the week
     const absOverlays=dayStrs.map((ds,di)=>{
       if(!ENG_ABSENCES[e]?.[ds])return'';
-      const L=(di/5*100).toFixed(2),W=(1/5*100).toFixed(2);
+      const L=(di/dayCount*100).toFixed(2),W=(1/dayCount*100).toFixed(2);
       return`<div style="position:absolute;left:${L}%;width:${W}%;top:0;bottom:0;background:repeating-linear-gradient(45deg,rgba(239,68,68,0.08),rgba(239,68,68,0.08) 5px,transparent 5px,transparent 12px);pointer-events:none;"></div>`;
     }).join('');
     const absCount=dayStrs.filter(ds=>ENG_ABSENCES[e]?.[ds]).length;
     const absBadge=absCount?`<span style="font-size:9px;color:#B91C1C;font-weight:600;"> (${absCount}d leave)</span>`:'';
-    const isAbsentAll=absCount===5;
+    const isAbsentAll=absCount===dayCount;
     // Working hours shading per day + overtime detection
     const wh=ENG_HOURS[e];
     let hoursOverlays='';
@@ -2120,12 +2158,11 @@ function renderTlWeek(){
       const wStart=parseHM(wh.start),wEnd=parseHM(wh.end);
       const shadeStyle='position:absolute;top:0;bottom:0;background:rgba(15,23,42,0.08);pointer-events:none;z-index:1';
       let hasOT=false;
-      const HN5=HN*5;
       dayStrs.forEach((ds,di)=>{
         if(ENG_ABSENCES[e]?.[ds])return;
         // Before-shift shade: left edge of day → shift start
         const beforeW=Math.max(0,(wStart-HS)/HN5*100);
-        const beforeL=di/5*100;
+        const beforeL=di/dayCount*100;
         // After-shift shade: shift end → right edge of day
         const afterL=(di*HN+(wEnd-HS))/HN5*100;
         const afterW=Math.max(0,(HE-wEnd)/HN5*100);
@@ -2243,18 +2280,25 @@ function tlCalcTime(event,rc){
     const d=new Date(DAY_DATE+'T12:00:00');
     d.setHours(h,m,0,0);
     return d;
-  } else if(TL_SPAN==='week'&&TL_WEEK_MON){
-    const HN5=HN*5;
-    const totalSlots=frac*HN5;
-    const dayIndex=Math.min(4,Math.floor(totalSlots/HN));
+  } else if((TL_SPAN==='week'||TL_SPAN==='2w'||TL_SPAN==='custom')&&TL_WEEK_MON){
+    const dc=TL_SPAN==='2w'?10:TL_SPAN==='custom'?(TL_CUSTOM_DAYS||5):5;
+    const HNall=HN*dc;
+    const totalSlots=frac*HNall;
+    const dayIndex=Math.min(dc-1,Math.floor(totalSlots/HN));
     const rawH=HS+(totalSlots%HN);
     const snapped=Math.round(rawH*4)/4;
     const h=Math.min(HE-1,Math.max(HS,Math.floor(snapped)));
     const m=Math.round((snapped-Math.floor(snapped))*60)%60;
-    const d=new Date(TL_WEEK_MON+'T12:00:00');
-    d.setDate(d.getDate()+dayIndex);
-    d.setHours(h,m,0,0);
-    return d;
+    const base=new Date(TL_WEEK_MON+'T12:00:00');
+    if(TL_SPAN==='2w'){
+      // 2w: 10 working days; calendar offsets 0,1,2,3,4,7,8,9,10,11
+      const offsets=[0,1,2,3,4,7,8,9,10,11];
+      base.setDate(base.getDate()+(offsets[dayIndex]||dayIndex));
+    } else {
+      base.setDate(base.getDate()+dayIndex);
+    }
+    base.setHours(h,m,0,0);
+    return base;
   }
   return null;
 }
