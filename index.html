@@ -3026,7 +3026,6 @@ function renderEngineers(){
             <div class="ec-field"><label>Home Address</label><textarea rows="2" data-f="address">${cfg.address||''}</textarea></div>
             <div class="ec-field-row">
               <div class="ec-field"><label>Postcode</label><input type="text" data-f="postcode" value="${cfg.postcode||''}"></div>
-              <div class="ec-field"><label>Travel Radius (mi)</label><input type="number" data-f="travelRadius" value="${cfg.travelRadius||25}" min="0" max="300"></div>
             </div>
             <div class="ec-field-row">
               <div class="ec-field"><label>Mobile</label><input type="tel" data-f="mobile" value="${cfg.mobile||''}"></div>
@@ -5660,7 +5659,7 @@ async function _runClientScheduler(from,to){
   function book(en,ds,s,dur){(busy[en]=busy[en]||{})[ds]=((busy[en]||{})[ds]||[]).concat({s,e:s+dur});}
 
   // 5. Greedy assignment
-  const SCOTLAND=55.0,MAX_KM=200;
+  const SCOTLAND=55.0,MI_TO_KM=1.60934;
   const cursor={},assignments=[],unschedulable=[];
   const jobsSorted=[...jobs].sort((a,b)=>a.date.localeCompare(b.date)||(b.skills.size-a.skills.size));
 
@@ -5676,13 +5675,17 @@ async function _runClientScheduler(from,to){
       const cfg=ENG_CONFIG[en]||{},home=ENG_HOMES[en]||{};
       const elat=home.lat||cfg.lat,elon=home.lng||home.lon||cfg.lon;
       const km=(elat&&elon&&job.lat&&job.lon)?_haversineKm(elat,elon,job.lat,job.lon):0;
-      if(km>MAX_KM)continue;
-      const ds=Math.max(480,_tMin(cfg.shiftStart||'08:00')),de=Math.min(1020,_tMin(cfg.shiftEnd||'17:00'));
+      const maxKm=(cfg.vtMaxRadius||62)*MI_TO_KM;
+      const minKm=(cfg.vtMinRadius||0)*MI_TO_KM;
+      if(km>maxKm)continue;
+      if(minKm>0&&km<minKm)continue;
+      const otMins=cfg.vtOvertime||0;
+      const ds=Math.max(480,_tMin(cfg.shiftStart||'08:00')),de=_tMin(cfg.shiftEnd||'17:00')+otMins;
       const slot=nextSlot(en,job.date,(cursor[en]||{})[job.date]||ds,de,dur);
       if(slot===null)continue;
       const esk=sbSkills[en]||new Set(ENG_SKILLS[en]||[]);
       const mr=job.skills.size?[...job.skills].filter(s=>esk.has(s)).length/job.skills.size:1;
-      const score=mr*40+Math.max(0,1-km/MAX_KM)*30+Math.max(0,1-((busy[en]||{})[job.date]||[]).length/9)*30;
+      const score=mr*40+Math.max(0,1-km/maxKm)*30+Math.max(0,1-((busy[en]||{})[job.date]||[]).length/9)*30;
       if(score>bestScore&&(job.skills.size===0||mr>0)){bestScore=score;bestEng=en;bestStart=slot;}
     }
     // Pass 2: closest available, any skill
@@ -5696,8 +5699,12 @@ async function _runClientScheduler(from,to){
         const cfg=ENG_CONFIG[en]||{},home=ENG_HOMES[en]||{};
         const elat=home.lat||cfg.lat,elon=home.lng||home.lon||cfg.lon;
         const km=(elat&&elon&&job.lat&&job.lon)?_haversineKm(elat,elon,job.lat,job.lon):0;
-        if(km>MAX_KM)continue;
-        const ds=Math.max(480,_tMin(cfg.shiftStart||'08:00')),de=Math.min(1020,_tMin(cfg.shiftEnd||'17:00'));
+        const maxKm=(cfg.vtMaxRadius||62)*MI_TO_KM;
+        const minKm=(cfg.vtMinRadius||0)*MI_TO_KM;
+        if(km>maxKm)continue;
+        if(minKm>0&&km<minKm)continue;
+        const otMins=cfg.vtOvertime||0;
+        const ds=Math.max(480,_tMin(cfg.shiftStart||'08:00')),de=_tMin(cfg.shiftEnd||'17:00')+otMins;
         const slot=nextSlot(en,job.date,(cursor[en]||{})[job.date]||ds,de,dur);
         if(slot===null)continue;
         bestEng=en;bestStart=slot;break;
