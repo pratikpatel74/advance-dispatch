@@ -3105,28 +3105,32 @@ async function saveEngConfig(name,fid){
   });
 
   try{
-    const r=await fetch(`${API}/api/engineer-config/${encodeURIComponent(name)}`,{
-      method:'PATCH',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(payload),
-      signal:AbortSignal.timeout(15000),
+    // Map modal fields → adv_engineers columns (backend unreachable; write direct to Supabase)
+    const sbBody={};
+    if(payload.shiftStart) sbBody.shift_start=payload.shiftStart;
+    if(payload.shiftEnd)   sbBody.shift_end=payload.shiftEnd;
+    if(payload.department) sbBody.department=payload.department;
+    if(payload.postcode)   sbBody.postcode=payload.postcode;
+    if(payload.lat!=null)  sbBody.home_lat=Number(payload.lat)||null;
+    if(payload.lon!=null)  sbBody.home_lon=Number(payload.lon)||null;
+
+    const SB_HDR={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_engineers?adv_name=eq.${encodeURIComponent(name)}`,{
+      method:'PATCH',headers:SB_HDR,body:JSON.stringify(sbBody),signal:AbortSignal.timeout(12000),
     });
-    const data=await r.json();
-    if(!r.ok)throw new Error(data.error||'Save failed');
-    // Merge into local state
-    ENG_CONFIG[name]=data.data;
-    if(data.data.lat&&data.data.lon){
-      ENG_HOMES[name]={lat:data.data.lat,lng:data.data.lon,postcode:data.data.postcode||'',travelRadius:data.data.travelRadius||25};
+    if(!r.ok){const t=await r.text();throw new Error(`Supabase ${r.status}: ${t}`);}
+
+    // Update local state immediately
+    ENG_CONFIG[name]=Object.assign(ENG_CONFIG[name]||{},payload);
+    if(payload.lat&&payload.lon){
+      ENG_HOMES[name]={lat:Number(payload.lat),lng:Number(payload.lon),postcode:payload.postcode||'',travelRadius:payload.travelRadius||25};
     }
-    // ENG_HOURS is the master for shift display — always update from save, even if backend echoes same value
-    if(data.data.shiftStart&&data.data.shiftEnd){
-      ENG_HOURS[name]={start:data.data.shiftStart,end:data.data.shiftEnd};
-    } else if(payload.shiftStart&&payload.shiftEnd){
+    // ENG_HOURS is master for shift display
+    if(payload.shiftStart&&payload.shiftEnd){
       ENG_HOURS[name]={start:payload.shiftStart,end:payload.shiftEnd};
     }
     renderTimeline();
-    const vtMsg=data.visitour==='pushed'?' · VISITOUR updated ✓':data.visitour==='push_failed'?' · VISITOUR push failed':'';
-    if(statusEl){statusEl.textContent='Saved ✓'+vtMsg;statusEl.className='ec-status ok';}
+    if(statusEl){statusEl.textContent='Saved ✓';statusEl.className='ec-status ok';}
     if(btn){btn.disabled=false;btn.textContent='Save';}
   }catch(err){
     if(statusEl){statusEl.textContent='Error: '+err.message;statusEl.className='ec-status err';}
