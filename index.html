@@ -717,11 +717,9 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
     <button class="spbtn" id="spW" onclick="setSpan('week')">Week</button>
     <button class="spbtn" id="sp2w" onclick="setSpan('2w')">2 Weeks</button>
     <button class="spbtn" id="spM" onclick="setSpan('month')">Month</button>
-    <span class="spbtn-custom" id="spCustomWrap">
-      <button class="spbtn" id="spC" onclick="setSpan('custom')" style="border-right:none;border-radius:6px 0 0 6px;padding-right:4px">Custom</button><span style="display:flex;align-items:center;border:1px solid var(--bdr2);border-left:none;border-radius:0 6px 6px 0;background:var(--surf);height:28px;padding:0 2px;gap:1px"><button onclick="adjustCustomDays(-1)" style="background:none;border:none;cursor:pointer;color:var(--t3);font-size:13px;padding:0 3px;line-height:1" title="Fewer days">−</button><span id="customDaysLbl" style="font-size:11px;font-weight:600;color:var(--t2);min-width:14px;text-align:center">5</span><button onclick="adjustCustomDays(1)" style="background:none;border:none;cursor:pointer;color:var(--t3);font-size:13px;padding:0 3px;line-height:1" title="More days">+</button></span>
-    </span>
+    <button class="spbtn" id="spC" onclick="cycleCustom()" title="Custom day range — click to cycle 2–7 days"><span id="customDaysLbl">5</span>d</button>
   </div>
-  <button class="opt-btn sec" id="todayBtn" onclick="goToday()" title="Jump to today" style="margin-left:2px">Today</button>
+  <button class="opt-btn sec" id="todayBtn" onclick="goToday()" title="Jump to today" style="margin-left:4px">Today</button>
   <div class="tsep"></div>
   <select class="fil" id="eF" onchange="filter()">
     <option value="">All Engineers</option>
@@ -1942,10 +1940,13 @@ async function loadAndRenderTl(){
   // Show Confirm Week button if draft jobs exist in this range
   if(TL_SPAN!=='day')checkDraftJobs?.();
 }
-function adjustCustomDays(delta){
-  TL_CUSTOM_DAYS=Math.max(2,Math.min(7,(TL_CUSTOM_DAYS||5)+delta));
+function cycleCustom(){
+  // If already on custom, cycle 2→3→4→5→6→7→2; otherwise just activate at current count
+  if(TL_SPAN==='custom'){
+    TL_CUSTOM_DAYS=TL_CUSTOM_DAYS>=7?2:(TL_CUSTOM_DAYS||5)+1;
+  }
   const lbl=document.getElementById('customDaysLbl');if(lbl)lbl.textContent=TL_CUSTOM_DAYS;
-  if(TL_SPAN==='custom'){TL_CALLS=null;loadAndRenderTl();}
+  setSpan('custom');
 }
 function goToday(){
   const today=new Date().toISOString().slice(0,10);
@@ -1957,6 +1958,8 @@ function setSpan(s){
   TL_SPAN=s;TL_CALLS=null;
   const ids={day:'spD',week:'spW','2w':'sp2w',month:'spM',custom:'spC'};
   Object.entries(ids).forEach(([k,id])=>{const el=document.getElementById(id);if(el)el.className='spbtn'+(s===k?' on':'');});
+  // Keep custom label in sync
+  const lbl=document.getElementById('customDaysLbl');if(lbl)lbl.textContent=TL_CUSTOM_DAYS;
   if(s==='day'){
     // Restore the day-specific date — span navigation must not bleed into day view
     SELECTED_DATE=DAY_DATE;
