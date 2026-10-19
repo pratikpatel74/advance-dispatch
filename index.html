@@ -1880,7 +1880,41 @@ async function loadAndRenderTl(){
       dl.textContent=fmt(from,{month:'short',year:'numeric'})+' – '+fmt(to,{month:'short',year:'numeric'});
     }
   }
-  const data=await fetchRange(from,to);
+  let data=await fetchRange(from,to);
+  if(!data){
+    // Backend API unavailable — load directly from Supabase for the full date range
+    try{
+      const SB_HDR={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
+      const qurl=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,address,postcode,latitude,longitude,engineer_name,status,call_type,scheduled_time,description,engineer_notes,category,required_skills,cancelled&cancelled=eq.0&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59&order=scheduled_time.asc&limit=5000`;
+      const sbr=await fetch(qurl,{signal:AbortSignal.timeout(10000),headers:SB_HDR});
+      if(sbr.ok){
+        const sm={'Allocated':'D','Attended':'D','Scheduled':'D','Unallocated':'O',
+                  'Awaiting Parts':'O','Awaiting Invoice Approval':'O',
+                  'Purchase Invoice Approved':'D','Acknowledged':'D',
+                  'Complete':'C','Completed':'C','Cannot Complete':'X'};
+        const rows=await sbr.json();
+        data=rows.map((row,i)=>({
+          id:            String(row.call_id||row.id),
+          vtid:          String(row.call_id||row.id),
+          customerName:  row.customer_name||'Unknown',
+          address:       row.postcode||row.address||'',
+          engineer:      row.engineer_name||'Unassigned',
+          status:        sm[row.status]||'O',
+          scheduledTime: row.scheduled_time||'',
+          estimatedDuration: 60,
+          drivingTime:0,distanceM:0,sequence:i,priority:'medium',
+          requiredSkills:(row.required_skills&&row.required_skills.length>0)?row.required_skills:(row.category?[row.category]:[]),
+          jobType:       row.call_type==='PPM'?'Planned Maintenance':'Reactive Service',
+          description:   row.description||'',
+          notes:         row.engineer_notes||'',
+          lat:           row.latitude||null,
+          lon:           row.longitude||null,
+          parts:[],labour:[]
+        }));
+        console.log(`TL week: loaded ${data.length} calls from Supabase (${from} → ${to})`);
+      }
+    }catch(e){console.warn('TL Supabase range load failed:',e);}
+  }
   TL_CALLS=data||(FORCE_MOCK?S.calls.map(c=>({...c})):[]);
   renderTimeline();
 }
