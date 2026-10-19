@@ -604,6 +604,7 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
 .cl-badge{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#EF4444;color:#fff;font-size:9px;font-weight:800;margin-left:4px;vertical-align:middle;display:none}
 .cl-badge.vis{display:inline-flex}
 
+.hidden{display:none!important}
 /* ── SUGGEST/UNDO TOOLBAR BUTTONS ── */
 .opt-btn{display:inline-flex;align-items:center;gap:5px;padding:0 12px;height:30px;border-radius:var(--rs);border:1px solid var(--brand);background:var(--brand);color:#fff;font-size:11px;font-weight:700;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;transition:all .12s;white-space:nowrap}
 .opt-btn:hover{background:var(--brand-d)}
@@ -767,6 +768,10 @@ textarea.finp{height:72px;padding:8px 10px;resize:vertical;line-height:1.4}
   <button class="opt-btn" onclick="suggestAll()" title="Auto-suggest best engineer for unassigned jobs on this date">
     <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
     Suggest All
+  </button>
+  <button class="opt-btn hidden" id="confirmWeekBtn" onclick="openConfirmWeek()" title="Confirm the draft schedule for this week" style="background:var(--brand);color:#fff;border-color:var(--brand)">
+    <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    Confirm Week
   </button>
   <button class="opt-btn sec" id="changeLogBtn" onclick="toggleChangeLog()" title="View schedule changes">
     <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
@@ -1917,6 +1922,8 @@ async function loadAndRenderTl(){
   }
   TL_CALLS=data||(FORCE_MOCK?S.calls.map(c=>({...c})):[]);
   renderTimeline();
+  // Show Confirm Week button if draft jobs exist in this range
+  if(TL_SPAN!=='day')checkDraftJobs?.();
 }
 function setSpan(s){
   TL_SPAN=s;TL_CALLS=null;
@@ -2274,21 +2281,42 @@ async function tlDrop(event){
   const timeDiff=newTime?Math.abs(newTime.getTime()-new Date(c.scheduledTime).getTime()):0;
   if(sameEng&&(!newTime||timeDiff<60000))return;
   // Build patch payload
+  const newISO=newTime?newTime.toISOString():c.scheduledTime;
   const patch={engineer:targetEng};
-  if(newTime)patch.scheduledTime=newTime.toISOString();
-  // Update local state in both pools
-  [sc,tc].forEach(r=>{if(!r)return;r.engineer=targetEng;r.engineerName=targetEng;if(newTime)r.scheduledTime=newTime.toISOString();});
+  if(newTime)patch.scheduledTime=newISO;
+  // Update local state in both pools immediately for snappy UI
+  [sc,tc].forEach(r=>{if(!r)return;r.engineer=targetEng;r.engineerName=targetEng;if(newTime)r.scheduledTime=newISO;});
   filter();renderTimeline();
   const lbl=newTime?` @ ${tlTimeLbl(newTime)}`:'';
   toast(`↔ ${id} → ${targetEng}${lbl}`);
+  // Write-back: try backend API first, fall back to Supabase REST directly
+  const sbBody={engineer_name:targetEng,scheduled_time:newISO,schedule_status:'draft'};
+  let saved=false;
   if(S.live){
     try{
-      await fetch(`${API}/calls/${id}`,{
+      const r=await fetch(`${API}/api/schedule/move`,{
         method:'PATCH',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(patch)
+        body:JSON.stringify({id,engineer_name:targetEng,scheduled_time:newISO}),
+        signal:AbortSignal.timeout(6000)
       });
-    }catch{toast('⚠ Could not save to server');}
+      saved=r.ok;
+    }catch{}
+  }
+  if(!saved){
+    // Direct Supabase write (matches on call_id since that's the frontend id)
+    try{
+      const sbHdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${encodeURIComponent(id)}`,{
+        method:'PATCH',headers:sbHdr,body:JSON.stringify(sbBody),
+        signal:AbortSignal.timeout(8000)
+      });
+      if(!r.ok)toast('⚠ Could not save to Supabase');
+      else{
+        // Show confirm button when there are draft jobs
+        document.getElementById('confirmWeekBtn')?.classList.remove('hidden');
+      }
+    }catch{toast('⚠ Supabase save failed');}
   }
 }
 
@@ -5506,7 +5534,42 @@ function clearAllAssignments(){
 /* ── SUGGEST ALL (Step 1) ── */
 let _suggestChanges=[];
 
+/* Week-view AI scheduling via backend API */
+async function suggestWeek(){
+  const{from,to}=getSpanRange();
+  const label=`${new Date(from+'T12:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short'})} – ${new Date(to+'T12:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short'})}`;
+  if(!confirm(`Generate AI draft schedule for ${label}?\n\nThis will assign unscheduled jobs for the week and mark them as draft. You can review, adjust, and confirm afterwards.`))return;
+
+  const btn=document.querySelector('[onclick="suggestAll()"]');
+  if(btn){btn.disabled=true;btn.textContent='Scheduling…';}
+  toast('Running AI scheduler…',4000);
+
+  try{
+    const r=await fetch(`${API}/api/schedule/generate`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({from,to,dry_run:false}),
+      signal:AbortSignal.timeout(60000)
+    });
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);
+    // Reload the week timeline from Supabase
+    await loadAndRenderTl();
+    toast(`✓ Draft schedule: ${d.assigned} jobs assigned, ${d.unschedulable} unschedulable`);
+    // Show confirm button
+    document.getElementById('confirmWeekBtn')?.classList.remove('hidden');
+  }catch(e){
+    toast(`Schedule failed: ${e.message}`);
+  }finally{
+    if(btn){btn.disabled=false;btn.innerHTML='<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Suggest All';}
+  }
+}
+
 function suggestAll(){
+  // In week/month/3m span — use AI backend scheduler
+  if(TL_SPAN&&TL_SPAN!=='day'){suggestWeek();return;}
+
+  // Day view: existing per-job suggestion logic
   // Target: all Open/unassigned jobs on the selected date
   const dateJobs=(S.calls.length?S.calls:MOCK).filter(c=>{
     const ds=(c.scheduledTime||'').slice(0,10);
@@ -5570,6 +5633,82 @@ function applySuggestAll(){
   if(S.view==='tl'){renderTimeline();setTimeout(markTlConflicts,80);}
   toast(`✓ ${_suggestChanges.length} jobs reassigned`);
   _suggestChanges=[];
+}
+
+/* ── CONFIRM WEEK ── */
+async function openConfirmWeek(){
+  const{from,to}=getSpanRange();
+  const fromLabel=new Date(from+'T12:00:00').toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
+  const toLabel=new Date(to+'T12:00:00').toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'});
+  // Count draft jobs in the range via Supabase
+  const sbHdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
+  let draftCount=0;
+  try{
+    const r=await fetch(
+      `${SUPABASE_URL}/rest/v1/adv_calls?select=id&schedule_status=eq.draft&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59`,
+      {headers:{...sbHdr,'Prefer':'count=exact'},signal:AbortSignal.timeout(8000)}
+    );
+    if(r.ok){
+      const countHdr=r.headers.get('content-range')||'';
+      draftCount=parseInt(countHdr.split('/')[1]||'0')||0;
+      if(!draftCount){const rows=await r.json();draftCount=rows.length;}
+    }
+  }catch{}
+  document.getElementById('confirmWeekSummary').innerHTML=
+    `<strong>${draftCount} draft job${draftCount!==1?'s':''}</strong> scheduled between<br>`+
+    `<span style="color:var(--brand)">${fromLabel}</span> and <span style="color:var(--brand)">${toLabel}</span><br><br>`+
+    (draftCount===0?'<span style="color:#EF4444">No draft jobs found in this week.</span>':'This will finalise the AI-generated assignments for the week.');
+  const applyBtn=document.getElementById('confirmWeekApplyBtn');
+  if(applyBtn)applyBtn.disabled=draftCount===0;
+  document.getElementById('confirmWeekModal').style.display='flex';
+}
+
+async function confirmWeekApply(){
+  const{from,to}=getSpanRange();
+  const applyBtn=document.getElementById('confirmWeekApplyBtn');
+  if(applyBtn){applyBtn.disabled=true;applyBtn.textContent='Confirming…';}
+  try{
+    // Try backend API first
+    let confirmed=0;
+    let saved=false;
+    try{
+      const r=await fetch(`${API}/api/schedule/confirm`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({from,to}),signal:AbortSignal.timeout(10000)
+      });
+      if(r.ok){const d=await r.json();confirmed=d.confirmed||0;saved=true;}
+    }catch{}
+    if(!saved){
+      // Direct Supabase bulk update
+      const sbHdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
+      const r=await fetch(
+        `${SUPABASE_URL}/rest/v1/adv_calls?schedule_status=eq.draft&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59`,
+        {method:'PATCH',headers:sbHdr,body:JSON.stringify({schedule_status:'confirmed'}),signal:AbortSignal.timeout(12000)}
+      );
+      saved=r.ok;
+    }
+    document.getElementById('confirmWeekModal').style.display='none';
+    document.getElementById('confirmWeekBtn')?.classList.add('hidden');
+    toast(saved?`✓ Schedule confirmed for w/c ${from}`:'⚠ Confirm failed — check connection');
+    // Reload timeline to reflect confirmed status
+    if(saved)await loadAndRenderTl();
+  }finally{
+    if(applyBtn){applyBtn.disabled=false;applyBtn.innerHTML='<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> Confirm Schedule';}
+  }
+}
+
+/* Check on load whether there are any draft jobs this week — show button if so */
+async function checkDraftJobs(){
+  if(TL_SPAN==='day')return;
+  const{from,to}=getSpanRange();
+  try{
+    const sbHdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
+    const r=await fetch(
+      `${SUPABASE_URL}/rest/v1/adv_calls?select=id&schedule_status=eq.draft&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59&limit=1`,
+      {headers:sbHdr,signal:AbortSignal.timeout(5000)}
+    );
+    if(r.ok){const rows=await r.json();if(rows.length>0)document.getElementById('confirmWeekBtn')?.classList.remove('hidden');}
+  }catch{}
 }
 
 /* ── CONFLICT INDICATORS (Step 4) ── */
@@ -5702,6 +5841,29 @@ if(typeof renderTlDay==='function'){
     <div class="sched-modal-ft">
       <button class="btn-cancel-sm" onclick="constraintCancel()">Cancel</button>
       <button class="btn-override" onclick="constraintOk()">Assign anyway →</button>
+    </div>
+  </div>
+</div>
+
+<!-- CONFIRM WEEK MODAL -->
+<div class="sched-modal-bg" id="confirmWeekModal" style="display:none" onclick="if(event.target===this)document.getElementById('confirmWeekModal').style.display='none'">
+  <div class="sched-modal" style="width:520px">
+    <div class="sched-modal-hd">
+      <svg width="16" height="16" fill="none" stroke="var(--brand)" stroke-width="2.5" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      Confirm Draft Schedule
+    </div>
+    <div class="sched-modal-body">
+      <div id="confirmWeekSummary" style="font-size:13px;color:var(--t2);line-height:1.7;padding:8px 0"></div>
+      <div style="margin-top:12px;padding:12px;background:rgba(23,96,181,.06);border-radius:8px;font-size:12px;color:var(--t3)">
+        Confirming locks the schedule. Engineers will be notified and jobs will be marked as finalised. You can still make individual changes afterwards.
+      </div>
+    </div>
+    <div class="sched-modal-ft">
+      <button class="btn-cancel-sm" onclick="document.getElementById('confirmWeekModal').style.display='none'">Cancel</button>
+      <button class="opt-btn" id="confirmWeekApplyBtn" onclick="confirmWeekApply()">
+        <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        Confirm Schedule
+      </button>
     </div>
   </div>
 </div>

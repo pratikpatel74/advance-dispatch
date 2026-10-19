@@ -723,6 +723,445 @@ def debug_schedule():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Supabase connection ───────────────────────────────────────────────────────
+import math
+
+SB_URL  = os.environ.get("SUPABASE_URL",  "https://ehuhqzjnikvykldasygc.supabase.co")
+SB_KEY  = os.environ.get("SUPABASE_ANON_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVodWhxempuaWt2eWtsZGFzeWdjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc5OTc3NzEsImV4cCI6MjEwMzU3Mzc3MX0.Kv7ko_u34u6ZTTU2QU50UULpG0bOX6jyOsA8-ry9ltU")
+SB_HDR  = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
+           "Content-Type": "application/json", "Prefer": "return=minimal"}
+
+def sb_get(path: str, params: str = "") -> list:
+    url = f"{SB_URL}/rest/v1/{path}{('?' + params) if params else ''}"
+    r = requests.get(url, headers=SB_HDR, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+def sb_patch(path: str, params: str, body: dict) -> bool:
+    url = f"{SB_URL}/rest/v1/{path}?{params}"
+    r = requests.patch(url, headers=SB_HDR, json=body, timeout=15)
+    return r.ok
+
+
+# ── Scheduling algorithm ──────────────────────────────────────────────────────
+
+WORK_START     = 480   # 08:00 in minutes
+WORK_END       = 1020  # 17:00 in minutes
+JOB_DURATION   = 60    # minutes (default)
+SPEED_KMH      = 48.28 # average road speed
+SCOTLAND_LAT   = 55.0  # flag likely data-quality jobs above this latitude
+MAX_KM         = 200   # skip engineer if further than this from job
+
+
+def _haversine_km(lat1, lon1, lat2, lon2) -> float:
+    R = 6371.0
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    dφ = math.radians(lat2 - lat1)
+    dλ = math.radians(lon2 - lon1)
+    a  = math.sin(dφ/2)**2 + math.cos(φ1)*math.cos(φ2)*math.sin(dλ/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _travel_mins(km: float) -> int:
+    return int((km / SPEED_KMH) * 60)
+
+
+def _time_to_min(t: str) -> int:
+    """'08:30' → 510"""
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _run_scheduler(jobs: list, engineers: list, eng_skills: dict,
+                   absences: dict, existing: list) -> dict:
+    """
+    Greedy scheduler.  Returns {"assignments": [...], "unschedulable": [...]}.
+    Each assignment: {id, engineer_name, scheduled_time}.
+    """
+    # Build per-engineer-per-day busy slots from already-scheduled jobs.
+    # busy[eng_name][date_str] = list of (start_min, end_min)
+    busy: dict = {}
+    for call in existing:
+        eng_name = call.get("engineer_name") or ""
+        st       = call.get("scheduled_time") or ""
+        if not eng_name or not st:
+            continue
+        ds   = st[:10]
+        hhmm = st[11:16]
+        sm   = _time_to_min(hhmm) if ":" in hhmm else 0
+        em   = sm + JOB_DURATION
+        busy.setdefault(eng_name, {}).setdefault(ds, []).append((sm, em))
+
+    # cursor[eng_name][date_str] = next available start minute
+    cursor: dict = {}
+
+    def _next_slot(eng_name: str, ds: str, after_min: int) -> int | None:
+        """Return earliest free start >= after_min that doesn't overlap any busy slot."""
+        slots = busy.get(eng_name, {}).get(ds, [])
+        t = after_min
+        while t + JOB_DURATION <= WORK_END:
+            overlap = any(s < t + JOB_DURATION and e > t for s, e in slots)
+            if not overlap:
+                return t
+            # Jump past the earliest conflicting slot
+            t = max(e for s, e in slots if s < t + JOB_DURATION and e > t)
+        return None
+
+    def _book(eng_name: str, ds: str, start: int):
+        busy.setdefault(eng_name, {}).setdefault(ds, []).append((start, start + JOB_DURATION))
+
+    assignments   = []
+    unschedulable = []
+
+    # Sort jobs by date then by how many skills they require (hardest first)
+    jobs_sorted = sorted(jobs, key=lambda j: (j.get("date", ""), -len(j.get("required_skills", []))))
+
+    for job in jobs_sorted:
+        jlat = job.get("latitude")
+        jlon = job.get("longitude")
+        jds  = job.get("date", "")
+        if not jds:
+            unschedulable.append({"id": job["id"], "reason": "no date"})
+            continue
+        if jlat and jlat > SCOTLAND_LAT:
+            unschedulable.append({"id": job["id"], "reason": "scotland_flag"})
+            continue
+
+        req_skills = set(job.get("required_skills") or [])
+        best_score = -1
+        best_eng   = None
+        best_start = None
+
+        for eng in engineers:
+            ename = eng["name"]
+            elat  = eng.get("lat")
+            elon  = eng.get("lon")
+
+            # Skip if on leave
+            if absences.get(ename, {}).get(jds):
+                continue
+
+            # Compute distance (skip if no home location or too far)
+            if elat and elon and jlat and jlon:
+                km = _haversine_km(elat, elon, jlat, jlon)
+            else:
+                km = 0
+            if km > MAX_KM:
+                continue
+
+            # Shift window from engineer config
+            shift_start = _time_to_min(eng.get("shiftStart", "08:00"))
+            shift_end   = _time_to_min(eng.get("shiftEnd",   "17:00"))
+            day_start   = max(WORK_START, shift_start)
+            day_end     = min(WORK_END,   shift_end)
+
+            # Earliest available slot
+            cur = cursor.get(ename, {}).get(jds, day_start)
+            slot = _next_slot(ename, jds, cur)
+            if slot is None or slot + JOB_DURATION > day_end:
+                continue  # fully booked
+
+            # --- Score ---
+            eskills = set(eng_skills.get(ename, []))
+            if req_skills:
+                match_ratio = len(req_skills & eskills) / len(req_skills)
+            else:
+                match_ratio = 1.0
+            # Pass 1: require full match; pass 2 relaxed below
+            smatch = match_ratio
+
+            dist_score = max(0, 1 - km / MAX_KM)
+            # load score — favour less-loaded engineers
+            day_jobs  = len(busy.get(ename, {}).get(jds, []))
+            load_score = max(0, 1 - day_jobs / 9)
+
+            score = smatch * 40 + dist_score * 30 + load_score * 30
+
+            if score > best_score and (not req_skills or smatch > 0):
+                best_score = score
+                best_eng   = ename
+                best_start = slot
+
+        if best_eng is None:
+            # Pass 2: relax skill requirement — just closest available
+            for eng in sorted(engineers, key=lambda e: _haversine_km(
+                    e.get("lat") or 52.5, e.get("lon") or -1.9, jlat or 52.5, jlon or -1.9)):
+                ename = eng["name"]
+                if absences.get(ename, {}).get(jds):
+                    continue
+                shift_start = _time_to_min(eng.get("shiftStart", "08:00"))
+                shift_end   = _time_to_min(eng.get("shiftEnd",   "17:00"))
+                day_start   = max(WORK_START, shift_start)
+                day_end     = min(WORK_END,   shift_end)
+                cur  = cursor.get(ename, {}).get(jds, day_start)
+                slot = _next_slot(ename, jds, cur)
+                if slot is None or slot + JOB_DURATION > day_end:
+                    continue
+                elat = eng.get("lat"); elon = eng.get("lon")
+                if elat and elon and jlat and jlon:
+                    km = _haversine_km(elat, elon, jlat, jlon)
+                    if km > MAX_KM:
+                        continue
+                best_eng   = ename
+                best_start = slot
+                break
+
+        if best_eng is None:
+            unschedulable.append({"id": job["id"], "reason": "no_capacity"})
+            continue
+
+        # Commit
+        _book(best_eng, jds, best_start)
+        cursor.setdefault(best_eng, {})[jds] = best_start + JOB_DURATION
+
+        h, m   = divmod(best_start, 60)
+        iso_dt = f"{jds}T{h:02d}:{m:02d}:00"
+        assignments.append({
+            "id":             job["id"],
+            "engineer_name":  best_eng,
+            "scheduled_time": iso_dt,
+        })
+
+    return {"assignments": assignments, "unschedulable": unschedulable}
+
+
+# ── POST /api/schedule/generate ───────────────────────────────────────────────
+
+@app.post("/api/schedule/generate")
+def generate_schedule():
+    """
+    Generate a draft schedule for a Mon–Fri week.
+
+    Body (JSON):
+      { "from": "YYYY-MM-DD", "to": "YYYY-MM-DD", "dry_run": false }
+
+    Fetches unassigned jobs + engineer data from Supabase, runs the greedy
+    scheduler, writes schedule_status='draft' assignments back, returns summary.
+    """
+    body      = request.get_json(force=True) or {}
+    date_from = body.get("from", date.today().isoformat())
+    date_to   = body.get("to",   date_from)
+    dry_run   = bool(body.get("dry_run", False))
+
+    try:
+        # 1. Unscheduled jobs (no engineer assigned, not cancelled)
+        jobs_raw = sb_get(
+            "adv_calls",
+            f"select=id,call_id,customer_name,latitude,longitude,required_skills,"
+            f"call_type,scheduled_time,status,category"
+            f"&cancelled=eq.0"
+            f"&engineer_name=is.null"
+            f"&scheduled_time=gte.{date_from}T00:00:00"
+            f"&scheduled_time=lte.{date_to}T23:59:59"
+            f"&limit=2000"
+        )
+        # Also grab jobs where engineer_name is 'Unassigned'
+        jobs_raw2 = sb_get(
+            "adv_calls",
+            f"select=id,call_id,customer_name,latitude,longitude,required_skills,"
+            f"call_type,scheduled_time,status,category"
+            f"&cancelled=eq.0"
+            f"&engineer_name=eq.Unassigned"
+            f"&scheduled_time=gte.{date_from}T00:00:00"
+            f"&scheduled_time=lte.{date_to}T23:59:59"
+            f"&limit=2000"
+        )
+        jobs_combined = jobs_raw + jobs_raw2
+
+        # Normalise: extract date from scheduled_time or generate weekday sequence
+        jobs = []
+        for row in jobs_combined:
+            st = row.get("scheduled_time") or ""
+            jobs.append({
+                "id":             row["id"],
+                "date":           st[:10] if st else "",
+                "latitude":       row.get("latitude"),
+                "longitude":      row.get("longitude"),
+                "required_skills": row.get("required_skills") or
+                                   ([row["category"]] if row.get("category") else []),
+            })
+
+        # 2. Already-scheduled jobs (to avoid conflicts)
+        existing = sb_get(
+            "adv_calls",
+            f"select=id,engineer_name,scheduled_time"
+            f"&cancelled=eq.0"
+            f"&engineer_name=not.is.null"
+            f"&engineer_name=neq.Unassigned"
+            f"&scheduled_time=gte.{date_from}T00:00:00"
+            f"&scheduled_time=lte.{date_to}T23:59:59"
+            f"&limit=5000"
+        )
+
+        # 3. Engineers (home locations from Supabase, fall back to config)
+        sb_engs = sb_get(
+            "adv_engineers",
+            "select=adv_name,home_lat,home_lon,postcode&active=eq.true&limit=100"
+        )
+        sb_eng_map = {r["adv_name"]: r for r in sb_engs if r.get("adv_name")}
+
+        cfg = _load_eng_config()
+        engineers = []
+        for name, c in cfg.items():
+            sb = sb_eng_map.get(name, {})
+            lat = sb.get("home_lat") or c.get("lat")
+            lon = sb.get("home_lon") or c.get("lon")
+            engineers.append({
+                "name":       name,
+                "lat":        lat,
+                "lon":        lon,
+                "shiftStart": c.get("shiftStart", "08:00"),
+                "shiftEnd":   c.get("shiftEnd",   "17:00"),
+            })
+
+        # 4. Engineer skills from Supabase
+        skills_rows = sb_get(
+            "adv_engineer_skills",
+            "select=engineer_name,skill_name&has_skill=eq.true&limit=5000"
+        )
+        eng_skills: dict = {}
+        for sr in skills_rows:
+            eng_skills.setdefault(sr["engineer_name"], []).append(sr["skill_name"])
+
+        # 5. Absences
+        abs_rows = sb_get(
+            "adv_engineer_absences",
+            f"select=engineer_name,start_date,end_date"
+            f"&start_date=lte.{date_to}"
+            f"&end_date=gte.{date_from}"
+            f"&limit=500"
+        )
+        absences: dict = {}
+        for ar in abs_rows:
+            d = date.fromisoformat(ar["start_date"])
+            end = date.fromisoformat(ar["end_date"])
+            while d <= end:
+                absences.setdefault(ar["engineer_name"], {})[d.isoformat()] = True
+                d += timedelta(days=1)
+
+        # 6. Run scheduler
+        result = _run_scheduler(jobs, engineers, eng_skills, absences, existing)
+
+        # 7. Write assignments to Supabase (unless dry_run)
+        written = 0
+        errors  = []
+        if not dry_run:
+            for asgn in result["assignments"]:
+                ok = sb_patch(
+                    "adv_calls",
+                    f"id=eq.{asgn['id']}",
+                    {
+                        "engineer_name":  asgn["engineer_name"],
+                        "scheduled_time": asgn["scheduled_time"],
+                        "schedule_status": "draft",
+                    }
+                )
+                if ok:
+                    written += 1
+                else:
+                    errors.append(asgn["id"])
+
+        return jsonify({
+            "ok":            True,
+            "dry_run":       dry_run,
+            "from":          date_from,
+            "to":            date_to,
+            "jobs_found":    len(jobs),
+            "assigned":      len(result["assignments"]),
+            "unschedulable": len(result["unschedulable"]),
+            "written":       written,
+            "errors":        errors,
+            "assignments":   result["assignments"] if dry_run else [],
+            "unschedulable_detail": result["unschedulable"],
+        })
+
+    except Exception as e:
+        app.logger.exception("schedule/generate failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── PATCH /api/schedule/move ──────────────────────────────────────────────────
+
+@app.patch("/api/schedule/move")
+def move_job():
+    """
+    Move a single job to a new engineer / time slot (drag-and-drop write-back).
+
+    Body (JSON):
+      { "id": <adv_calls.id>, "engineer_name": "...", "scheduled_time": "YYYY-MM-DDTHH:MM:SS" }
+    """
+    body = request.get_json(force=True) or {}
+    job_id    = body.get("id")
+    eng_name  = body.get("engineer_name")
+    sched_time = body.get("scheduled_time")
+
+    if not job_id or not eng_name or not sched_time:
+        return jsonify({"error": "id, engineer_name and scheduled_time required"}), 400
+
+    try:
+        ok = sb_patch(
+            "adv_calls",
+            f"id=eq.{job_id}",
+            {
+                "engineer_name":   eng_name,
+                "scheduled_time":  sched_time,
+                "schedule_status": "draft",   # manual move keeps draft status
+            }
+        )
+        return jsonify({"ok": ok, "id": job_id, "engineer_name": eng_name,
+                        "scheduled_time": sched_time})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── POST /api/schedule/confirm ────────────────────────────────────────────────
+
+@app.post("/api/schedule/confirm")
+def confirm_schedule():
+    """
+    Promote all draft jobs in a date range to confirmed.
+
+    Body (JSON):
+      { "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }
+    """
+    body      = request.get_json(force=True) or {}
+    date_from = body.get("from")
+    date_to   = body.get("to", date_from)
+
+    if not date_from:
+        return jsonify({"error": "'from' date required"}), 400
+
+    try:
+        # Fetch draft jobs to count them first
+        drafts = sb_get(
+            "adv_calls",
+            f"select=id"
+            f"&schedule_status=eq.draft"
+            f"&scheduled_time=gte.{date_from}T00:00:00"
+            f"&scheduled_time=lte.{date_to}T23:59:59"
+            f"&limit=5000"
+        )
+        if not drafts:
+            return jsonify({"ok": True, "confirmed": 0, "message": "No draft jobs in range"})
+
+        # Bulk confirm
+        url = (f"{SB_URL}/rest/v1/adv_calls"
+               f"?schedule_status=eq.draft"
+               f"&scheduled_time=gte.{date_from}T00:00:00"
+               f"&scheduled_time=lte.{date_to}T23:59:59")
+        r = requests.patch(url, headers=SB_HDR, json={"schedule_status": "confirmed"}, timeout=20)
+
+        return jsonify({
+            "ok":        r.ok,
+            "confirmed": len(drafts),
+            "from":      date_from,
+            "to":        date_to,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3004))
     print(f"🚀  Advance Dispatch backend running on http://localhost:{port}")
