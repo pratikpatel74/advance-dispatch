@@ -3042,8 +3042,8 @@ function renderEngineers(){
             </div>
             <div class="ec-field"><label>Area</label>${sel('area',areaOpts,cfg.area||'')}</div>
             <div class="ec-field-row">
-              <div class="ec-field"><label>Shift Start</label><input type="time" data-f="shiftStart" value="${cfg.shiftStart||'08:00'}"></div>
-              <div class="ec-field"><label>Shift End</label><input type="time" data-f="shiftEnd" value="${cfg.shiftEnd||'16:00'}"></div>
+              <div class="ec-field"><label>Shift Start</label><input type="time" data-f="shiftStart" value="${wh.start||cfg.shiftStart||'08:00'}"></div>
+              <div class="ec-field"><label>Shift End</label><input type="time" data-f="shiftEnd" value="${wh.end||cfg.shiftEnd||'17:00'}"></div>
             </div>
             ${cfg.fmExtId?`<div class="ec-field"><label>VISITOUR FMExtID</label><input type="text" value="${cfg.fmExtId}" disabled style="opacity:.5"></div>`:''}
           </div>
@@ -3118,9 +3118,13 @@ async function saveEngConfig(name,fid){
     if(data.data.lat&&data.data.lon){
       ENG_HOMES[name]={lat:data.data.lat,lng:data.data.lon,postcode:data.data.postcode||'',travelRadius:data.data.travelRadius||25};
     }
+    // ENG_HOURS is the master for shift display — always update from save, even if backend echoes same value
     if(data.data.shiftStart&&data.data.shiftEnd){
       ENG_HOURS[name]={start:data.data.shiftStart,end:data.data.shiftEnd};
+    } else if(payload.shiftStart&&payload.shiftEnd){
+      ENG_HOURS[name]={start:payload.shiftStart,end:payload.shiftEnd};
     }
+    renderTimeline();
     const vtMsg=data.visitour==='pushed'?' · VISITOUR updated ✓':data.visitour==='push_failed'?' · VISITOUR push failed':'';
     if(statusEl){statusEl.textContent='Saved ✓'+vtMsg;statusEl.className='ec-status ok';}
     if(btn){btn.disabled=false;btn.textContent='Save';}
