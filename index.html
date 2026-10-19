@@ -5544,6 +5544,20 @@ function _haversineKm(lat1,lon1,lat2,lon2){
 function _tStr(min){const h=Math.floor(min/60),m=min%60;return`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;}
 function _tMin(hhmm){if(!hhmm)return 480;const[h,m]=hhmm.split(':');return+h*60+ +m;}
 
+/* ── SKILL → DURATION MAP (Option B: max skill duration per job) ── */
+const SKILL_DURATION={
+  'Insect Killer':20,
+  'Prep':30,'Holding Unit':30,'Gantry':30,
+  'Accessories':45,'Waste Disposal':45,'Water Boilers':45,'Prime Cooking':45,'Combi':45,
+  'Warewashing':60,'Microwave':60,'Extraction':60,
+  'Refrigeration':90,'Countering':90,'Air Con':90,'Grease Trap':90,
+};
+function _jobDuration(skills){
+  // Option B: duration = longest single skill in the array; default 60 if unknown/empty
+  if(!skills||!skills.size)return 60;
+  return Math.max(60,...[...skills].map(s=>SKILL_DURATION[s]||60));
+}
+
 /* ── SHARED CLIENT-SIDE SCHEDULER ── */
 async function _runClientScheduler(from,to){
   const SB_HDR={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
@@ -5573,7 +5587,7 @@ async function _runClientScheduler(from,to){
   const sbSkills={};
   skillRows.forEach(r=>{sbSkills[r.engineer_name]=sbSkills[r.engineer_name]||new Set();sbSkills[r.engineer_name].add(r.skill_name);});
 
-  // 4. Busy slots from existing jobs
+  // 4. Busy slots from existing jobs (use 60-min default for existing — we don't know their skill)
   const busy={};
   existing.forEach(c=>{
     const e=c.engineer_name,st=c.scheduled_time;
@@ -5582,16 +5596,16 @@ async function _runClientScheduler(from,to){
     (busy[e]=busy[e]||{})[ds]=((busy[e]||{})[ds]||[]).concat({s:sm,e:sm+60});
   });
 
-  function nextSlot(en,ds,after,dayEnd){
+  function nextSlot(en,ds,after,dayEnd,dur){
     const slots=(busy[en]||{})[ds]||[];
     let t=after;
-    while(t+60<=dayEnd){
-      if(!slots.some(sl=>sl.s<t+60&&sl.e>t))return t;
-      t=Math.max(...slots.filter(sl=>sl.s<t+60&&sl.e>t).map(sl=>sl.e));
+    while(t+dur<=dayEnd){
+      if(!slots.some(sl=>sl.s<t+dur&&sl.e>t))return t;
+      t=Math.max(...slots.filter(sl=>sl.s<t+dur&&sl.e>t).map(sl=>sl.e));
     }
     return null;
   }
-  function book(en,ds,s){(busy[en]=busy[en]||{})[ds]=((busy[en]||{})[ds]||[]).concat({s,e:s+60});}
+  function book(en,ds,s,dur){(busy[en]=busy[en]||{})[ds]=((busy[en]||{})[ds]||[]).concat({s,e:s+dur});}
 
   // 5. Greedy assignment
   const SCOTLAND=55.0,MAX_KM=200;
@@ -5602,6 +5616,8 @@ async function _runClientScheduler(from,to){
     if(!job.date||job.id==null){unschedulable.push(job.id);continue;}
     if(job.lat&&job.lat>SCOTLAND){unschedulable.push(job.id);continue;}
 
+    const dur=_jobDuration(job.skills);  // Option B: max skill duration
+
     let bestScore=-1,bestEng=null,bestStart=null;
     for(const en of ALL_ENGS){
       if((ENG_ABSENCES[en]||{})[job.date])continue;
@@ -5610,7 +5626,7 @@ async function _runClientScheduler(from,to){
       const km=(elat&&elon&&job.lat&&job.lon)?_haversineKm(elat,elon,job.lat,job.lon):0;
       if(km>MAX_KM)continue;
       const ds=Math.max(480,_tMin(cfg.shiftStart||'08:00')),de=Math.min(1020,_tMin(cfg.shiftEnd||'17:00'));
-      const slot=nextSlot(en,job.date,(cursor[en]||{})[job.date]||ds,de);
+      const slot=nextSlot(en,job.date,(cursor[en]||{})[job.date]||ds,de,dur);
       if(slot===null)continue;
       const esk=sbSkills[en]||new Set(ENG_SKILLS[en]||[]);
       const mr=job.skills.size?[...job.skills].filter(s=>esk.has(s)).length/job.skills.size:1;
@@ -5630,15 +5646,15 @@ async function _runClientScheduler(from,to){
         const km=(elat&&elon&&job.lat&&job.lon)?_haversineKm(elat,elon,job.lat,job.lon):0;
         if(km>MAX_KM)continue;
         const ds=Math.max(480,_tMin(cfg.shiftStart||'08:00')),de=Math.min(1020,_tMin(cfg.shiftEnd||'17:00'));
-        const slot=nextSlot(en,job.date,(cursor[en]||{})[job.date]||ds,de);
+        const slot=nextSlot(en,job.date,(cursor[en]||{})[job.date]||ds,de,dur);
         if(slot===null)continue;
         bestEng=en;bestStart=slot;break;
       }
     }
     if(!bestEng){unschedulable.push(job.id);continue;}
-    book(bestEng,job.date,bestStart);
-    (cursor[bestEng]=cursor[bestEng]||{})[job.date]=bestStart+60;
-    assignments.push({id:job.id,engineer_name:bestEng,scheduled_time:`${job.date}T${_tStr(bestStart)}:00`});
+    book(bestEng,job.date,bestStart,dur);
+    (cursor[bestEng]=cursor[bestEng]||{})[job.date]=bestStart+dur;
+    assignments.push({id:job.id,engineer_name:bestEng,scheduled_time:`${job.date}T${_tStr(bestStart)}:00`,duration_minutes:dur});
   }
 
   // 6. Write to Supabase
