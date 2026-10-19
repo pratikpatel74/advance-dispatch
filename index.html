@@ -4543,12 +4543,19 @@ async function loadBulkJobs(){
   const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
   const sm={'Allocated':'D','Attended':'D','Scheduled':'D','Unallocated':'O','Awaiting Parts':'O','Awaiting Invoice Approval':'O','Complete':'C','Completed':'C','Cannot Complete':'X'};
   try{
-    const url=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,address,postcode,latitude,longitude,engineer_name,status,call_type,scheduled_time,description,category,required_skills&cancelled=eq.0&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59&order=scheduled_time.asc&limit=2000`;
+    // Fetch unassigned + AI-drafted jobs (schedule_status IS NULL or 'draft')
+    const url=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,address,postcode,latitude,longitude,engineer_name,status,call_type,scheduled_time,description,category,required_skills,schedule_status&cancelled=eq.0&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59&order=scheduled_time.asc&limit=2000`;
     const r=await fetch(url,{signal:AbortSignal.timeout(12000),headers:hdr});
     if(!r.ok){countEl.textContent=`Error ${r.status}`;return;}
     const rows=await r.json();
     BA.jobs=rows
-      .filter(row=>{const s=sm[row.status]||'O';return s!=='C'&&(!row.engineer_name||row.engineer_name===''||row.engineer_name==='Unassigned');})
+      .filter(row=>{
+        const s=sm[row.status]||'O';
+        if(s==='C')return false; // completed — skip
+        const isDraft=row.schedule_status==='draft';
+        const isUnassigned=!row.engineer_name||row.engineer_name===''||row.engineer_name==='Unassigned';
+        return isDraft||isUnassigned;
+      })
       .map((row,i)=>({
         id:String(row.call_id||row.id),
         customerName:row.customer_name||'Unknown',
@@ -4558,11 +4565,20 @@ async function loadBulkJobs(){
         requiredSkills:(row.required_skills&&row.required_skills.length>0)?row.required_skills:(row.category?[row.category]:[]),
         lat:row.latitude||null,lon:row.longitude||null,
         estimatedDuration:60,description:row.description||'',
-        engineer:'Unassigned',status:sm[row.status]||'O',parts:[],labour:[],
+        engineer:row.engineer_name||'Unassigned',status:sm[row.status]||'O',
+        isDraft:row.schedule_status==='draft',
+        parts:[],labour:[],
         sequence:i,priority:'medium',drivingTime:0,distanceM:0
       }));
+    // Pre-select draft engineers so planner can confirm or override
     BA.selections={};
-    countEl.textContent=`${BA.jobs.length.toLocaleString()} unallocated jobs`;
+    BA.jobs.forEach(j=>{if(j.isDraft&&j.engineer&&j.engineer!=='Unassigned')BA.selections[j.id]=j.engineer;});
+    const draftCount=BA.jobs.filter(j=>j.isDraft).length;
+    const unassignedCount=BA.jobs.filter(j=>!j.isDraft).length;
+    countEl.textContent=draftCount&&unassignedCount
+      ?`${unassignedCount} unassigned · ${draftCount} AI-drafted`
+      :draftCount?`${draftCount} AI-drafted jobs to review`
+      :`${unassignedCount} unassigned jobs`;
     // Ensure skills are loaded from Supabase BEFORE building ENG_DATA
     await loadFromSupabase();
     window._engTs=0; // force ENG_DATA rebuild so e.skills is populated
@@ -4628,20 +4644,23 @@ function renderBulkTable(){
     }).join('&nbsp;');
 
     const noSug=!suggestions.length?'<span style="font-size:11px;color:var(--t4);font-family:IBM Plex Sans,sans-serif">No eligible engineers</span>':'';
+    const draftBadge=job.isDraft?`<span style="font-size:9px;font-weight:700;padding:2px 5px;background:#2E7CF618;color:#2E7CF6;border-radius:3px;border:1px solid #2E7CF640;font-family:'IBM Plex Sans',sans-serif">AI Draft</span>`:'';
+    const confirmLabel=job.isDraft?'Confirm':'Save';
     const rowConfirmBtn=selEng
       ?`<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
           <span style="font-size:11px;font-weight:600;color:#1AB37A;font-family:IBM Plex Sans,sans-serif;white-space:nowrap">✓ ${selEng.split(' ')[0]}</span>
-          <button onclick="confirmSingleJob('${job.id}')" style="font-size:10px;font-weight:700;padding:3px 8px;background:#1AB37A;border:none;border-radius:4px;color:#fff;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;white-space:nowrap">Save</button>
+          <button onclick="confirmSingleJob('${job.id}')" style="font-size:10px;font-weight:700;padding:3px 8px;background:#1AB37A;border:none;border-radius:4px;color:#fff;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;white-space:nowrap">${confirmLabel}</button>
           <button onclick="clearBulkSelection('${job.id}')" style="font-size:10px;padding:2px 6px;background:transparent;border:1px solid var(--bdr);border-radius:4px;color:var(--t3);cursor:pointer;font-family:'IBM Plex Sans',sans-serif">✕</button>
         </div>`
       :'';
 
-    return`<div style="display:grid;grid-template-columns:80px 1fr 1fr 2fr 80px;align-items:start;gap:12px;padding:12px 24px;border-bottom:1px solid var(--bdr);background:${selEng?'var(--s-c-bg)':'var(--surf)'}">
+    return`<div style="display:grid;grid-template-columns:80px 1fr 1fr 2fr 80px;align-items:start;gap:12px;padding:12px 24px;border-bottom:1px solid var(--bdr);background:${selEng?'var(--s-c-bg)':job.isDraft?'#2E7CF606':'var(--surf)'}">
       <div>
         <div style="font-size:12px;font-weight:600;color:var(--t1);font-family:'IBM Plex Mono',monospace">${date}</div>
         <div style="font-size:11px;color:var(--t3)">${time}</div>
       </div>
       <div>
+        <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px">${draftBadge}</div>
         <div style="font-size:12px;font-weight:600;color:var(--t1);font-family:'IBM Plex Sans',sans-serif;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.customerName}</div>
         <div style="font-size:11px;color:var(--t3);font-family:'IBM Plex Mono',monospace">${job.address}</div>
         <div style="font-size:10px;color:var(--t4);margin-top:2px">${job.id} · ${job.jobType}</div>
@@ -4670,25 +4689,33 @@ function clearBulkSelection(jobId){
 }
 
 function selectAllBest(){
+  // For unassigned jobs: pick best suggestion. For draft jobs: keep existing unless overriding.
   BA.jobs.forEach(job=>{
+    if(job.isDraft&&BA.selections[job.id])return; // already has selection (draft engineer)
     const top=getBulkSuggestions(job)[0];
     if(top)BA.selections[job.id]=top.name;
   });
   renderBulkTable();
-  toast(`⚡ ${Object.keys(BA.selections).length} jobs auto-selected`);
+  toast(`⚡ ${Object.keys(BA.selections).length} jobs selected`);
 }
 
 async function confirmSingleJob(jobId){
   const engName=BA.selections[jobId];
   if(!engName){toast('Select an engineer first');return;}
+  const job=BA.jobs.find(j=>j.id===jobId);
   const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
   try{
-    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify({engineer_name:engName,status:'Allocated'})});
+    const body={engineer_name:engName,status:'Allocated',schedule_status:'confirmed'};
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify(body)});
     if(r.ok){
       BA.jobs=BA.jobs.filter(j=>j.id!==jobId);
       delete BA.selections[jobId];
-      document.getElementById('baCount').textContent=`${BA.jobs.length.toLocaleString()} unallocated jobs`;
-      toast(`✓ Assigned to ${engName}`);
+      const draftCount=BA.jobs.filter(j=>j.isDraft).length;
+      const unassignedCount=BA.jobs.filter(j=>!j.isDraft).length;
+      document.getElementById('baCount').textContent=draftCount&&unassignedCount
+        ?`${unassignedCount} unassigned · ${draftCount} AI-drafted`
+        :draftCount?`${draftCount} AI-drafted jobs to review`:`${unassignedCount} unassigned jobs`;
+      toast(job?.isDraft?`✓ Confirmed: ${engName}`:`✓ Assigned to ${engName}`);
       renderBulkTable();
     }else{toast('Save failed');}
   }catch{toast('Save failed');}
@@ -4703,7 +4730,8 @@ async function confirmBulkAssign(){
   let ok=0,fail=0;
   for(const[jobId,engName]of entries){
     try{
-      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify({engineer_name:engName,status:'Allocated'})});
+      const body={engineer_name:engName,status:'Allocated',schedule_status:'confirmed'};
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify(body)});
       if(r.ok){ok++;const j=BA.jobs.find(x=>x.id===jobId);if(j)j.engineer=engName;}
       else fail++;
     }catch{fail++;}
@@ -4711,8 +4739,12 @@ async function confirmBulkAssign(){
   BA.jobs=BA.jobs.filter(j=>!BA.selections[j.id]);
   BA.selections={};
   btn.textContent='✓ Confirm All Selections';btn.disabled=false;
-  toast(fail?`✓ ${ok} assigned, ${fail} failed`:`✓ ${ok} jobs assigned`);
-  document.getElementById('baCount').textContent=`${BA.jobs.length.toLocaleString()} unallocated jobs`;
+  toast(fail?`✓ ${ok} confirmed, ${fail} failed`:`✓ ${ok} jobs confirmed`);
+  const draftCount=BA.jobs.filter(j=>j.isDraft).length;
+  const unassignedCount=BA.jobs.filter(j=>!j.isDraft).length;
+  document.getElementById('baCount').textContent=draftCount&&unassignedCount
+    ?`${unassignedCount} unassigned · ${draftCount} AI-drafted`
+    :draftCount?`${draftCount} AI-drafted jobs to review`:`${unassignedCount} unassigned jobs`;
   renderBulkTable();
 }
 
