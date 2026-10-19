@@ -2004,21 +2004,31 @@ function renderTlDay(){
     const escEng=e.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
     const isAbsent=!!(ENG_ABSENCES[e]?.[DAY_DATE]);
     const absOverlay=isAbsent?`<div style="position:absolute;inset:0;background:repeating-linear-gradient(45deg,rgba(239,68,68,0.07),rgba(239,68,68,0.07) 6px,transparent 6px,transparent 14px);pointer-events:none;border-radius:4px;"></div><div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:11px;font-weight:600;color:#B91C1C;background:rgba(255,255,255,0.85);padding:2px 8px;border-radius:10px;white-space:nowrap;">On Leave</div>`:'';
-    // Working hours shading
+    // Working hours shading + overtime detection
     let hoursOverlay='';
+    let overtimeBadge='';
     const wh=ENG_HOURS[e];
     if(wh&&!isAbsent){
       const parseHM=s=>{const[hh,mm]=(s||'').split(':').map(Number);return hh+(mm||0)/60;};
       const wStart=parseHM(wh.start),wEnd=parseHM(wh.end);
       const beforePct=Math.max(0,Math.min(((wStart-HS)/HN*100),100));
       const afterPct=Math.max(0,Math.min(((HE-wEnd)/HN*100),100));
-      const shadeStyle='position:absolute;top:0;bottom:0;background:rgba(0,0,0,0.05);pointer-events:none;z-index:1';
-      if(beforePct>0) hoursOverlay+=`<div style="${shadeStyle};left:0;width:${beforePct.toFixed(2)}%" title="Before ${wh.start}"></div>`;
-      if(afterPct>0)  hoursOverlay+=`<div style="${shadeStyle};right:0;width:${afterPct.toFixed(2)}%" title="After ${wh.end}"></div>`;
+      const shadeStyle='position:absolute;top:0;bottom:0;background:rgba(15,23,42,0.08);pointer-events:none;z-index:1';
+      if(beforePct>0) hoursOverlay+=`<div style="${shadeStyle};left:0;width:${beforePct.toFixed(2)}%" title="Before shift start (${wh.start})"></div>`;
+      if(afterPct>0)  hoursOverlay+=`<div style="${shadeStyle};right:0;width:${afterPct.toFixed(2)}%" title="After shift end (${wh.end})"></div>`;
+      // Overtime: any job ending past shift end
+      const shiftEndMins=wEnd*60;
+      const hasOT=calls.some(c=>{
+        if(!c.scheduledTime)return false;
+        const t=new Date(c.scheduledTime);
+        const sm=t.getHours()*60+t.getMinutes();
+        return sm+(c.estimatedDuration||60)>shiftEndMins;
+      });
+      if(hasOT) overtimeBadge=`<span title="Jobs running past shift end (${wh.end})" style="display:inline-flex;align-items:center;gap:2px;font-size:9px;font-weight:700;color:#92400E;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:1px 5px;margin-left:3px;">⚠ OT</span>`;
     }
     const rowStyle=isAbsent?'opacity:0.5;':'';
     const hrLabel=wh&&!isAbsent?`<div class="tl-ec2" style="font-size:9px;color:var(--t4)">${wh.start}–${wh.end}</div>`:'';
-    return`<div class="tl-row" style="${rowStyle}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsent?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}</div><div class="tl-ec2">${isAbsent?'On Leave':cnt+' call'+(cnt!==1?'s':'')}</div>${hrLabel}${travelLabel}</div></div><div class="tl-rc" style="position:relative;" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${hoursOverlay}${nl}${bars}${extraBars}${absOverlay}</div></div>`;
+    return`<div class="tl-row" style="${rowStyle}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsent?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}${overtimeBadge}</div><div class="tl-ec2">${isAbsent?'On Leave':cnt+' call'+(cnt!==1?'s':'')}</div>${hrLabel}${travelLabel}</div></div><div class="tl-rc" style="position:relative;" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${hoursOverlay}${nl}${bars}${extraBars}${absOverlay}</div></div>`;
   }).join('');
   tl.innerHTML=head+rows;
 }
@@ -2097,7 +2107,39 @@ function renderTlWeek(){
     const absCount=dayStrs.filter(ds=>ENG_ABSENCES[e]?.[ds]).length;
     const absBadge=absCount?`<span style="font-size:9px;color:#B91C1C;font-weight:600;"> (${absCount}d leave)</span>`:'';
     const isAbsentAll=absCount===5;
-    return`<div class="tl-row" style="${isAbsentAll?'opacity:0.5;':''}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsentAll?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}${absBadge}</div><div class="tl-ec2">${cnt} call${cnt!==1?'s':''}</div></div></div><div class="tl-rc" style="position:relative;" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${bars.join('')}${travelBars.join('')}${absOverlays}</div></div>`;
+    // Working hours shading per day + overtime detection
+    const wh=ENG_HOURS[e];
+    let hoursOverlays='';
+    let weekOvertimeBadge='';
+    if(wh){
+      const parseHM=s=>{const[hh,mm]=(s||'').split(':').map(Number);return hh+(mm||0)/60;};
+      const wStart=parseHM(wh.start),wEnd=parseHM(wh.end);
+      const shadeStyle='position:absolute;top:0;bottom:0;background:rgba(15,23,42,0.08);pointer-events:none;z-index:1';
+      let hasOT=false;
+      const HN5=HN*5;
+      dayStrs.forEach((ds,di)=>{
+        if(ENG_ABSENCES[e]?.[ds])return;
+        // Before-shift shade: left edge of day → shift start
+        const beforeW=Math.max(0,(wStart-HS)/HN5*100);
+        const beforeL=di/5*100;
+        // After-shift shade: shift end → right edge of day
+        const afterL=(di*HN+(wEnd-HS))/HN5*100;
+        const afterW=Math.max(0,(HE-wEnd)/HN5*100);
+        if(beforeW>0.1) hoursOverlays+=`<div style="${shadeStyle};left:${beforeL.toFixed(2)}%;width:${beforeW.toFixed(2)}%" title="Before ${wh.start}"></div>`;
+        if(afterW>0.1)  hoursOverlays+=`<div style="${shadeStyle};left:${afterL.toFixed(2)}%;width:${afterW.toFixed(2)}%" title="After ${wh.end}"></div>`;
+        // Overtime check for this day
+        const shiftEndMins=wEnd*60;
+        ((em[e]&&em[e][ds])||[]).forEach(c=>{
+          if(!c.scheduledTime)return;
+          const t=new Date(c.scheduledTime);
+          const sm=t.getHours()*60+t.getMinutes();
+          if(sm+(c.estimatedDuration||60)>shiftEndMins)hasOT=true;
+        });
+      });
+      if(hasOT) weekOvertimeBadge=`<span title="Jobs running past shift end on one or more days (${wh.end})" style="display:inline-flex;align-items:center;gap:2px;font-size:9px;font-weight:700;color:#92400E;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:1px 5px;margin-left:3px;">⚠ OT</span>`;
+    }
+    const wkHrLabel=wh?`<div class="tl-ec2" style="font-size:9px;color:var(--t4)">${wh.start}–${wh.end}</div>`:'';
+    return`<div class="tl-row" style="${isAbsentAll?'opacity:0.5;':''}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsentAll?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}${absBadge}${weekOvertimeBadge}</div><div class="tl-ec2">${cnt} call${cnt!==1?'s':''}</div>${wkHrLabel}</div></div><div class="tl-rc" style="position:relative;" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${hoursOverlays}${bars.join('')}${travelBars.join('')}${absOverlays}</div></div>`;
   }).join('');
   tl.innerHTML=head+rows;
 }
