@@ -175,6 +175,8 @@ select.fil:focus{border-color:var(--brand)}
 .tl-now::before{content:'';position:absolute;top:-1px;left:-4px;width:10px;height:10px;border-radius:50%;background:#E53E3E}
 .tl-bar{position:absolute;top:50%;transform:translateY(-50%);height:36px;border-radius:5px;border:1.5px solid transparent;display:flex;align-items:center;padding:0 9px;cursor:grab;overflow:hidden;transition:filter .15s,transform .15s,opacity .15s;z-index:3}
 .tl-bar:hover{filter:brightness(.91);transform:translateY(calc(-50% - 1px))}
+.tl-bar.ln{transform:none!important;}
+.tl-bar.ln:hover{transform:none!important;filter:brightness(.91);}
 .tl-travel{position:absolute;bottom:4px;height:15px;border-radius:3px;pointer-events:all;z-index:2;background:rgba(100,116,139,0.15);border:1px solid rgba(100,116,139,0.35);display:flex;align-items:center;padding:0 4px;overflow:hidden;white-space:nowrap;cursor:default;font-size:9px;font-weight:600;color:#475569;font-family:'IBM Plex Mono',monospace;letter-spacing:.01em;gap:2px}
 .tl-travel:hover{background:rgba(100,116,139,0.26);border-color:rgba(100,116,139,0.6)}
 .tl-travel.tr-home{background:rgba(99,102,241,0.12);border-color:rgba(99,102,241,0.35);color:#4338CA}
@@ -1970,6 +1972,21 @@ function navToDay(ds){SELECTED_DATE=ds;DAY_DATE=ds;const dp=document.getElementB
 function navToWeek(monStr){SELECTED_DATE=monStr;const dp=document.getElementById('datePicker');if(dp)dp.value=monStr;setSpan('week');}
 
 /* ── TL: DAY VIEW ── */
+/* Assign stacking lanes to overlapping job bars within one engineer-day */
+function assignOverlapLanes(calls){
+  const sorted=[...calls].sort((a,b)=>new Date(a.scheduledTime)-new Date(b.scheduledTime));
+  const laneEnds=[]; // ms timestamp when each lane becomes free
+  sorted.forEach(c=>{
+    const start=new Date(c.scheduledTime).getTime();
+    const end=start+(c.estimatedDuration||60)*60000;
+    let lane=laneEnds.findIndex(e=>e<=start);
+    if(lane===-1)lane=laneEnds.length;
+    laneEnds[lane]=end;
+    c._lane=lane;
+  });
+  return{items:sorted,laneCount:Math.max(1,laneEnds.length)};
+}
+
 function renderTlDay(){
   const tl=document.getElementById('tlIn');
   const hrs=Array.from({length:HN},(_,i)=>HS+i);
@@ -1985,14 +2002,18 @@ function renderTlDay(){
     const col=ec(e),calls=em[e]||[];
     const gl=hrs.map(()=>'<div class="tl-g"></div>').join('');
     const nl=showNow?`<div class="tl-now" style="left:${nPct}%"></div>`:'';
-    const bars=calls.map(c=>{
+    const {items:lanedCalls,laneCount}=assignOverlapLanes(calls);
+    const LH=32,LG=4,LP=4; // lane height, gap, top-pad
+    const bars=lanedCalls.map(c=>{
       const t=new Date(c.scheduledTime),sH=t.getHours()+t.getMinutes()/60;
       const dur=(c.estimatedDuration||60)/60;
       const L=Math.max(0,(sH-HS)/HN*100),W=Math.min(dur/HN*100,100-L);
       if(L>=100||W<=0)return'';
       const bc={O:{bg:'#FFF8EC',br:'#E8A020',tx:'#92570E'},D:{bg:'#EDF4FF',br:'#2E7CF6',tx:'#1348A8'},C:{bg:'#F3F4F6',br:'#9CA3AF',tx:'#6B7280'}}[c.status]||{bg:'#FFF8EC',br:'#E8A020',tx:'#92570E'};
       const sel=S.selId===c.id;
-      return`<div class="tl-bar" draggable="true" ondragstart="tlDragStart(event,'${c.id}')" ondragend="tlDragEnd(event)" style="left:${L.toFixed(2)}%;width:${W.toFixed(2)}%;background:${bc.bg};border-color:${bc.br};${c.status==='C'?'opacity:.4;':''}${sel?'outline:2px solid '+col+';':''}" onclick="pick('${c.id}')" title="${c.id} — ${c.customerName||''}"><span class="tl-bt" style="color:${bc.tx};${c.status==='C'?'text-decoration:line-through;':''}">${ft(c.scheduledTime)} ${c.customerName||''}</span></div>`;
+      const laneStyle=laneCount>1?`top:${LP+c._lane*(LH+LG)}px;height:${LH}px;`:'';
+      const laneClass=laneCount>1?' ln':'';
+      return`<div class="tl-bar${laneClass}" draggable="true" ondragstart="tlDragStart(event,'${c.id}')" ondragend="tlDragEnd(event)" style="left:${L.toFixed(2)}%;width:${W.toFixed(2)}%;background:${bc.bg};border-color:${bc.br};${c.status==='C'?'opacity:.4;':''}${sel?'outline:2px solid '+col+';':''}${laneStyle}" onclick="pick('${c.id}')" title="${c.id} — ${c.customerName||''}"><span class="tl-bt" style="color:${bc.tx};${c.status==='C'?'text-decoration:line-through;':''}">${ft(c.scheduledTime)} ${c.customerName||''}</span></div>`;
     }).join('');
     let extraBars='';
     let dTl=null;
@@ -2059,7 +2080,9 @@ function renderTlDay(){
     }
     const rowStyle=isAbsent?'opacity:0.5;':'';
     const hrLabel=wh&&!isAbsent?`<div class="tl-ec2" style="font-size:9px;color:var(--t4)">${wh.start}–${wh.end}</div>`:'';
-    return`<div class="tl-row" style="${rowStyle}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsent?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}${overtimeBadge}</div><div class="tl-ec2">${isAbsent?'On Leave':cnt+' call'+(cnt!==1?'s':'')}</div>${hrLabel}${travelLabel}</div></div><div class="tl-rc" style="position:relative;" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${hoursOverlay}${nl}${bars}${extraBars}${absOverlay}</div></div>`;
+    // Expand row height when jobs overlap
+    const rcMinH=laneCount>1?`min-height:${4+laneCount*(32+4)}px;`:'';
+    return`<div class="tl-row" style="${rowStyle}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsent?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}${overtimeBadge}</div><div class="tl-ec2">${isAbsent?'On Leave':cnt+' call'+(cnt!==1?'s':'')}</div>${hrLabel}${travelLabel}</div></div><div class="tl-rc" style="position:relative;${rcMinH}" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${hoursOverlay}${nl}${bars}${extraBars}${absOverlay}</div></div>`;
   }).join('');
   tl.innerHTML=head+rows;
 }
@@ -2108,9 +2131,13 @@ function renderTlWeek(){
       Array.from({length:HN},(_,hi)=>`<div class="tl-g" style="${hi===HN-1?'border-right:2px solid var(--bdr2)':''}"></div>`).join('')
     ).join('');
     const bars=[];
+    let wkMaxLanes=1;
     dayStrs.forEach((ds,di)=>{
       const dcalls=(em[e]&&em[e][ds])||[];
-      dcalls.forEach(c=>{
+      const {items:lanedDay,laneCount:lc}=assignOverlapLanes(dcalls);
+      if(lc>wkMaxLanes)wkMaxLanes=lc;
+      const LH=32,LG=4,LP=4;
+      lanedDay.forEach(c=>{
         const t=new Date(c.scheduledTime),sH=t.getHours()+t.getMinutes()/60;
         const dur=(c.estimatedDuration||60)/60;
         const slotL=di*HN+(sH-HS);
@@ -2118,7 +2145,9 @@ function renderTlWeek(){
         const W=Math.min(dur/HN5*100,100-L);
         if(L>=100||W<=0)return;
         const bc={O:{bg:'#FFF8EC',br:'#E8A020',tx:'#92570E'},D:{bg:'#EDF4FF',br:'#2E7CF6',tx:'#1348A8'},C:{bg:'#F3F4F6',br:'#9CA3AF',tx:'#6B7280'}}[c.status]||{bg:'#FFF8EC',br:'#E8A020',tx:'#92570E'};
-        bars.push(`<div class="tl-bar" draggable="true" ondragstart="tlDragStart(event,'${c.id}')" ondragend="tlDragEnd(event)" style="left:${L.toFixed(2)}%;width:${W.toFixed(2)}%;background:${bc.bg};border-color:${bc.br};${c.status==='C'?'opacity:.4;':''}" onclick="pick('${c.id}')" title="${c.id} — ${c.customerName||''}"><span class="tl-bt" style="color:${bc.tx};${c.status==='C'?'text-decoration:line-through;':''}">${c.customerName||''}</span></div>`);
+        const laneStyle=lc>1?`top:${LP+c._lane*(LH+LG)}px;height:${LH}px;`:'';
+        const laneClass=lc>1?' ln':'';
+        bars.push(`<div class="tl-bar${laneClass}" draggable="true" ondragstart="tlDragStart(event,'${c.id}')" ondragend="tlDragEnd(event)" style="left:${L.toFixed(2)}%;width:${W.toFixed(2)}%;background:${bc.bg};border-color:${bc.br};${c.status==='C'?'opacity:.4;':''}${laneStyle}" onclick="pick('${c.id}')" title="${c.id} — ${c.customerName||''}"><span class="tl-bt" style="color:${bc.tx};${c.status==='C'?'text-decoration:line-through;':''}">${c.customerName||''}</span></div>`);
       });
     });
     // Travel bars for week view
@@ -2183,7 +2212,8 @@ function renderTlWeek(){
       if(hasOT) weekOvertimeBadge=`<span title="Jobs running past shift end on one or more days (${wh.end})" style="display:inline-flex;align-items:center;gap:2px;font-size:9px;font-weight:700;color:#92400E;background:#FEF3C7;border:1px solid #FCD34D;border-radius:8px;padding:1px 5px;margin-left:3px;">⚠ OT</span>`;
     }
     const wkHrLabel=wh?`<div class="tl-ec2" style="font-size:9px;color:var(--t4)">${wh.start}–${wh.end}</div>`:'';
-    return`<div class="tl-row" style="${isAbsentAll?'opacity:0.5;':''}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsentAll?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}${absBadge}${weekOvertimeBadge}</div><div class="tl-ec2">${cnt} call${cnt!==1?'s':''}</div>${wkHrLabel}</div></div><div class="tl-rc" style="position:relative;" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${hoursOverlays}${bars.join('')}${travelBars.join('')}${absOverlays}</div></div>`;
+    const wkRcMinH=wkMaxLanes>1?`min-height:${4+wkMaxLanes*(32+4)}px;`:'';
+    return`<div class="tl-row" style="${isAbsentAll?'opacity:0.5;':''}"><div class="tl-rl"><div class="tl-big-av" style="background:${isAbsentAll?'#9CA3AF':col}">${ini(e)}</div><div><div class="tl-en">${e}${absBadge}${weekOvertimeBadge}</div><div class="tl-ec2">${cnt} call${cnt!==1?'s':''}</div>${wkHrLabel}</div></div><div class="tl-rc" style="position:relative;${wkRcMinH}" data-eng="${escEng}" ondragover="tlDragOver(event)" ondragleave="tlDragLeave(event)" ondrop="tlDrop(event)"><div class="tl-gl">${gl}</div>${hoursOverlays}${bars.join('')}${travelBars.join('')}${absOverlays}</div></div>`;
   }).join('');
   tl.innerHTML=head+rows;
 }
@@ -4622,7 +4652,7 @@ async function loadBulkJobs(){
         scheduledTime:row.scheduled_time||'',
         jobType:row.call_type==='PPM'?'PPM':'Reactive',
         requiredSkills:(row.required_skills&&row.required_skills.length>0)?row.required_skills:(row.category?[row.category]:[]),
-        lat:row.latitude||null,lon:row.longitude||null,
+        lat:row.latitude||null,lon:row.longitude||null,postcode:row.postcode||'',
         estimatedDuration:60,description:row.description||'',
         engineer:row.engineer_name||'Unassigned',status:sm[row.status]||'O',
         isDraft:row.schedule_status==='draft',
@@ -4787,37 +4817,42 @@ async function confirmBulkAssign(){
   btn.textContent='Saving…';btn.disabled=true;
   const SB_HDR={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
   const hdr={...SB_HDR,'Content-Type':'application/json','Prefer':'return=minimal'};
-
-  // Determine target date from bulk assign date picker
   const fromDate=document.getElementById('baFrom')?.value||SELECTED_DATE;
 
-  // Fetch engineer shift times from adv_engineers
-  const engShifts={};
+  // Fetch engineer shift + home location
+  const engInfo={};
   try{
-    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_engineers?select=adv_name,shift_start`,{headers:SB_HDR});
-    if(r.ok){(await r.json()).forEach(e=>{engShifts[e.adv_name]=e.shift_start||'08:00:00';});}
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_engineers?select=adv_name,shift_start,shift_end,home_lat,home_lon,postcode`,{headers:SB_HDR});
+    if(r.ok)(await r.json()).forEach(e=>{engInfo[e.adv_name]=e;});
   }catch{}
 
-  // For each unique engineer that has unscheduled jobs, find their next free slot
-  const engNextSlot={}; // engName -> Date (next available time)
+  // Per-engineer state: current position (lat/lon/postcode) and next free time
+  // Initialised lazily; for engineers with existing jobs on fromDate we fast-forward past them
+  const engState={}; // engName -> {time:Date, lat, lon, postcode}
+
   const unscheduledEngs=[...new Set(
     entries.filter(([id])=>{const j=BA.jobs.find(x=>x.id===id);return j&&!j.scheduledTime;})
            .map(([,eng])=>eng)
   )];
   await Promise.all(unscheduledEngs.map(async eng=>{
-    const shift=engShifts[eng]||'08:00:00';
-    const [sh,sm]=shift.split(':').map(Number);
-    const base=new Date(fromDate+'T00:00:00');
-    base.setHours(sh,sm||0,0,0);
+    const info=engInfo[eng]||{};
+    const shift=info.shift_start||'08:00:00';
+    const[sh,sm]=shift.split(':').map(Number);
+    const base=new Date(fromDate+'T00:00:00');base.setHours(sh,sm||0,0,0);
+    let curLat=info.home_lat,curLon=info.home_lon,curPc=info.postcode||'';
     try{
-      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?select=scheduled_time&engineer_name=eq.${encodeURIComponent(eng)}&cancelled=eq.0&scheduled_time=gte.${fromDate}T00:00:00&scheduled_time=lte.${fromDate}T23:59:59&order=scheduled_time.asc&limit=200`,{headers:SB_HDR});
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?select=scheduled_time,latitude,longitude,postcode&engineer_name=eq.${encodeURIComponent(eng)}&cancelled=eq.0&scheduled_time=gte.${fromDate}T00:00:00&scheduled_time=lte.${fromDate}T23:59:59&order=scheduled_time.asc&limit=200`,{headers:SB_HDR});
       if(r.ok){
         (await r.json()).forEach(j=>{
-          if(j.scheduled_time){const end=new Date(j.scheduled_time);end.setMinutes(end.getMinutes()+60);if(end>base)base.setTime(end.getTime());}
+          if(j.scheduled_time){
+            const end=new Date(j.scheduled_time);end.setMinutes(end.getMinutes()+60);
+            if(end>base)base.setTime(end.getTime());
+            if(j.latitude&&j.longitude){curLat=j.latitude;curLon=j.longitude;curPc=j.postcode||curPc;}
+          }
         });
       }
     }catch{}
-    engNextSlot[eng]=base;
+    engState[eng]={time:base,lat:curLat,lon:curLon,postcode:curPc};
   }));
 
   let ok=0,fail=0;
@@ -4825,19 +4860,34 @@ async function confirmBulkAssign(){
     try{
       const job=BA.jobs.find(x=>x.id===jobId);
       const body={engineer_name:engName,status:'Allocated',schedule_status:'confirmed'};
-      // Auto-slot into engineer's shift if no scheduled_time
+
       if(!job?.scheduledTime){
-        if(!engNextSlot[engName]){
-          const shift=engShifts[engName]||'08:00:00';
+        // Initialise state if not already done (engineer had no unscheduled jobs but now has one)
+        if(!engState[engName]){
+          const info=engInfo[engName]||{};
+          const shift=info.shift_start||'08:00:00';
           const[sh,sm]=shift.split(':').map(Number);
           const d=new Date(fromDate+'T00:00:00');d.setHours(sh,sm||0,0,0);
-          engNextSlot[engName]=d;
+          engState[engName]={time:d,lat:info.home_lat,lon:info.home_lon,postcode:info.postcode||''};
         }
-        body.scheduled_time=engNextSlot[engName].toISOString();
-        // Advance slot by 60 min for next job to same engineer
-        const next=new Date(engNextSlot[engName]);next.setMinutes(next.getMinutes()+60);
-        engNextSlot[engName]=next;
+        const st=engState[engName];
+        const jobLat=job.lat,jobLon=job.lon,jobPc=job.postcode||'';
+
+        // Travel time from current position to this job (30-min floor unless same/neighbour postcode)
+        let tMins=30; // default if no coords
+        if(st.lat&&st.lon&&jobLat&&jobLon){
+          tMins=travelMins(st.lat,st.lon,jobLat,jobLon,st.postcode,jobPc);
+        }
+
+        const slotTime=new Date(st.time);
+        slotTime.setMinutes(slotTime.getMinutes()+tMins);
+        body.scheduled_time=slotTime.toISOString();
+
+        // Advance state to end of this job (60 min), ready for next travel calc
+        const nextTime=new Date(slotTime);nextTime.setMinutes(nextTime.getMinutes()+60);
+        engState[engName]={time:nextTime,lat:jobLat||st.lat,lon:jobLon||st.lon,postcode:jobPc||st.postcode};
       }
+
       const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify(body)});
       if(r.ok){ok++;if(job)job.engineer=engName;}
       else fail++;
@@ -5261,12 +5311,25 @@ const TRAVEL_CACHE={
   "53.6346,-2.1963|53.6026,-2.1563":12.9
 };
 
-function travelMins(lat1,lng1,lat2,lng2){
+/* Returns true when two postcodes are in the same district (e.g. B76, CV7) —
+   same or neighbouring area → use actual calculated time rather than 30-min floor */
+function sameOrNeighbourPostcode(pc1,pc2){
+  if(!pc1||!pc2)return false;
+  const n=s=>s.replace(/\s+/g,'').toUpperCase();
+  const p1=n(pc1),p2=n(pc2);
+  if(p1===p2)return true;
+  // Same outward code district: e.g. B76, CV7, NN14
+  const dist=s=>(s.match(/^[A-Z]{1,2}\d{1,2}/)||[''])[0];
+  const d1=dist(p1),d2=dist(p2);
+  return d1.length>0&&d1===d2;
+}
+function travelMins(lat1,lng1,lat2,lng2,pc1,pc2){
   const key=`${lat1},${lng1}|${lat2},${lng2}`;
-  if(TRAVEL_CACHE[key]!==undefined) return Math.round(TRAVEL_CACHE[key]);
-  // fallback haversine
-  const miles=haversine(lat1,lng1,lat2,lng2)*ROAD_FACTOR;
-  return Math.round(miles/AVG_SPEED_MPH*60);
+  const raw=TRAVEL_CACHE[key]!==undefined
+    ?Math.round(TRAVEL_CACHE[key])
+    :Math.round(haversine(lat1,lng1,lat2,lng2)*ROAD_FACTOR/AVG_SPEED_MPH*60);
+  // Same/neighbour postcode → use actual (could be short). Different → 30 min minimum.
+  return sameOrNeighbourPostcode(pc1,pc2)?raw:Math.max(30,raw);
 }
 
 function minsToTime(m){
@@ -5287,7 +5350,7 @@ function buildEngDayTimeline(engName, dateStr){
     .map(j=>{
       const d=new Date(j.scheduledTime);
       const startMins=d.getHours()*60+d.getMinutes();
-      const loc=JOB_LOCS[j.id]||null;
+      const loc=getJobLoc(j.id); // uses JOB_LOCS or j.lat/j.lon from real DB rows
       return{...j,startMins,loc};
     })
     .sort((a,b)=>a.startMins-b.startMins);
@@ -5296,7 +5359,7 @@ function buildEngDayTimeline(engName, dateStr){
   let cursor=engStartMins;
   let totalTravel=0;
   let totalWork=0;
-  let prevLat=home.lat,prevLng=home.lng,prevLabel='Home';
+  let prevLat=home.lat,prevLng=home.lng,prevLabel='Home',prevPostcode=home.postcode||'';
   let lunchInserted=false;
   let lunchOk=true;
 
@@ -5307,10 +5370,10 @@ function buildEngDayTimeline(engName, dateStr){
     const j=jobs[i];
     const jobLoc=j.loc;
 
-    // Travel to this job
+    // Travel to this job (30-min floor unless same/neighbour postcode)
     let tMins=0;
     if(jobLoc){
-      tMins=travelMins(prevLat,prevLng,jobLoc.lat,jobLoc.lng);
+      tMins=travelMins(prevLat,prevLng,jobLoc.lat,jobLoc.lng,prevPostcode,j.postcode||'');
     }
     totalTravel+=tMins;
 
@@ -5357,7 +5420,7 @@ function buildEngDayTimeline(engName, dateStr){
     if(!lunchInserted&&i<jobs.length-1){
       const next=jobs[i+1];
       const nextLoc=next.loc;
-      const nextTravel=nextLoc?travelMins(jobLoc?.lat||home.lat,jobLoc?.lng||home.lng,nextLoc.lat,nextLoc.lng):0;
+      const nextTravel=nextLoc?travelMins(jobLoc?.lat||home.lat,jobLoc?.lng||home.lng,nextLoc.lat,nextLoc.lng,j.postcode||'',next.postcode||''):0;
       const gapEnd=next.startMins-nextTravel;
       if(cursor+LUNCH_MINS<=gapEnd&&cursor>=10.5*60&&cursor<14*60){
         items.push({type:'lunch',time:cursor,label:'Lunch break',sub:'30 min'});
@@ -5369,6 +5432,7 @@ function buildEngDayTimeline(engName, dateStr){
     prevLat=jobLoc?.lat||home.lat;
     prevLng=jobLoc?.lng||home.lng;
     prevLabel=j.customerName;
+    prevPostcode=j.postcode||prevPostcode;
   }
 
   // After all jobs — try to insert lunch if not yet done
@@ -5381,7 +5445,7 @@ function buildEngDayTimeline(engName, dateStr){
   if(!lunchInserted){lunchOk=false;}
 
   // Travel home
-  const homeTMins=travelMins(prevLat,prevLng,home.lat,home.lng);
+  const homeTMins=travelMins(prevLat,prevLng,home.lat,home.lng,prevPostcode,home.postcode||'');
   totalTravel+=homeTMins;
   if(homeTMins>0){
     items.push({type:'travel',time:cursor,mins:homeTMins,from:prevLabel,to:'Home',address:home.postcode,isReturn:true});
