@@ -4594,11 +4594,19 @@ async function loadBulkJobs(){
   const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
   const sm={'Allocated':'D','Attended':'D','Scheduled':'D','Unallocated':'O','Awaiting Parts':'O','Awaiting Invoice Approval':'O','Complete':'C','Completed':'C','Cannot Complete':'X'};
   try{
-    // Fetch unassigned + AI-drafted jobs (schedule_status IS NULL or 'draft')
-    const url=`${SUPABASE_URL}/rest/v1/adv_calls?select=id,call_id,customer_name,address,postcode,latitude,longitude,engineer_name,status,call_type,scheduled_time,description,category,required_skills,schedule_status&cancelled=eq.0&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59&order=scheduled_time.asc&limit=2000`;
-    const r=await fetch(url,{signal:AbortSignal.timeout(12000),headers:hdr});
-    if(!r.ok){countEl.textContent=`Error ${r.status}`;return;}
-    const rows=await r.json();
+    const SEL='select=id,call_id,customer_name,address,postcode,latitude,longitude,engineer_name,status,call_type,scheduled_time,cal_opened,description,category,required_skills,schedule_status';
+    // Fetch 1: jobs with scheduled_time in range
+    const [r1,r2]=await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/adv_calls?${SEL}&cancelled=eq.0&scheduled_time=gte.${from}T00:00:00&scheduled_time=lte.${to}T23:59:59&order=scheduled_time.asc&limit=2000`,{signal:AbortSignal.timeout(12000),headers:hdr}),
+      // Fetch 2: unscheduled (no scheduled_time) unallocated jobs — most recent first
+      fetch(`${SUPABASE_URL}/rest/v1/adv_calls?${SEL}&cancelled=eq.0&scheduled_time=is.null&engineer_name=is.null&order=cal_opened.desc&limit=300`,{signal:AbortSignal.timeout(12000),headers:hdr})
+    ]);
+    if(!r1.ok){countEl.textContent=`Error ${r1.status}`;return;}
+    const scheduled=await r1.json();
+    const unscheduled=r2.ok?await r2.json():[];
+    // Merge, deduplicating by id
+    const seen=new Set(scheduled.map(r=>r.id));
+    const rows=[...scheduled,...unscheduled.filter(r=>!seen.has(r.id))];
     BA.jobs=rows
       .filter(row=>{
         const s=sm[row.status]||'O';
@@ -4608,7 +4616,7 @@ async function loadBulkJobs(){
         return isDraft||isUnassigned;
       })
       .map((row,i)=>({
-        id:String(row.call_id||row.id),
+        id:String(row.id),callId:String(row.call_id||row.id),
         customerName:row.customer_name||'Unknown',
         address:row.postcode||row.address||'',
         scheduledTime:row.scheduled_time||'',
@@ -4757,7 +4765,7 @@ async function confirmSingleJob(jobId){
   const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
   try{
     const body={engineer_name:engName,status:'Allocated',schedule_status:'confirmed'};
-    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify(body)});
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify(body)});
     if(r.ok){
       BA.jobs=BA.jobs.filter(j=>j.id!==jobId);
       delete BA.selections[jobId];
@@ -4777,13 +4785,61 @@ async function confirmBulkAssign(){
   if(!entries.length){toast('Nothing selected');return;}
   const btn=document.getElementById('baConfirmBtn');
   btn.textContent='Saving…';btn.disabled=true;
-  const hdr={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json','Prefer':'return=minimal'};
+  const SB_HDR={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY};
+  const hdr={...SB_HDR,'Content-Type':'application/json','Prefer':'return=minimal'};
+
+  // Determine target date from bulk assign date picker
+  const fromDate=document.getElementById('baFrom')?.value||SELECTED_DATE;
+
+  // Fetch engineer shift times from adv_engineers
+  const engShifts={};
+  try{
+    const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_engineers?select=adv_name,shift_start`,{headers:SB_HDR});
+    if(r.ok){(await r.json()).forEach(e=>{engShifts[e.adv_name]=e.shift_start||'08:00:00';});}
+  }catch{}
+
+  // For each unique engineer that has unscheduled jobs, find their next free slot
+  const engNextSlot={}; // engName -> Date (next available time)
+  const unscheduledEngs=[...new Set(
+    entries.filter(([id])=>{const j=BA.jobs.find(x=>x.id===id);return j&&!j.scheduledTime;})
+           .map(([,eng])=>eng)
+  )];
+  await Promise.all(unscheduledEngs.map(async eng=>{
+    const shift=engShifts[eng]||'08:00:00';
+    const [sh,sm]=shift.split(':').map(Number);
+    const base=new Date(fromDate+'T00:00:00');
+    base.setHours(sh,sm||0,0,0);
+    try{
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?select=scheduled_time&engineer_name=eq.${encodeURIComponent(eng)}&cancelled=eq.0&scheduled_time=gte.${fromDate}T00:00:00&scheduled_time=lte.${fromDate}T23:59:59&order=scheduled_time.asc&limit=200`,{headers:SB_HDR});
+      if(r.ok){
+        (await r.json()).forEach(j=>{
+          if(j.scheduled_time){const end=new Date(j.scheduled_time);end.setMinutes(end.getMinutes()+60);if(end>base)base.setTime(end.getTime());}
+        });
+      }
+    }catch{}
+    engNextSlot[eng]=base;
+  }));
+
   let ok=0,fail=0;
   for(const[jobId,engName]of entries){
     try{
+      const job=BA.jobs.find(x=>x.id===jobId);
       const body={engineer_name:engName,status:'Allocated',schedule_status:'confirmed'};
-      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?call_id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify(body)});
-      if(r.ok){ok++;const j=BA.jobs.find(x=>x.id===jobId);if(j)j.engineer=engName;}
+      // Auto-slot into engineer's shift if no scheduled_time
+      if(!job?.scheduledTime){
+        if(!engNextSlot[engName]){
+          const shift=engShifts[engName]||'08:00:00';
+          const[sh,sm]=shift.split(':').map(Number);
+          const d=new Date(fromDate+'T00:00:00');d.setHours(sh,sm||0,0,0);
+          engNextSlot[engName]=d;
+        }
+        body.scheduled_time=engNextSlot[engName].toISOString();
+        // Advance slot by 60 min for next job to same engineer
+        const next=new Date(engNextSlot[engName]);next.setMinutes(next.getMinutes()+60);
+        engNextSlot[engName]=next;
+      }
+      const r=await fetch(`${SUPABASE_URL}/rest/v1/adv_calls?id=eq.${jobId}`,{method:'PATCH',headers:hdr,body:JSON.stringify(body)});
+      if(r.ok){ok++;if(job)job.engineer=engName;}
       else fail++;
     }catch{fail++;}
   }
